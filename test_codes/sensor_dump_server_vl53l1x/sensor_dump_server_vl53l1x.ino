@@ -13,7 +13,7 @@ AsyncWebServer server(80);
 VL53L1X sensor;
 
 // === Configuration ===
-uint16_t timingBudget = 20000; // µs
+uint16_t timingBudget = 20000;
 
 #define MAX_READINGS 300
 uint16_t readings[MAX_READINGS];
