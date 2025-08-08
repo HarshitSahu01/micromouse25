@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Micromouse Dashboard</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #f9f9fc;
+      margin: 0;
+      padding: 0;
+      height: 100vh;
+      display: flex;
+    }
+    .left-col, .right-col {
+      box-sizing: border-box;
+      padding: 20px;
+      overflow-y: auto;
+    }
+    .left-col {
+      width: 50%;
+      border-right: 1px solid #ddd;
+    }
+    .right-col {
+      width: 50%;
+    }
+    h2, h3 { color: #333; margin-top: 0; }
+    .status, .data, .controls {
+      background: #fff;
+      border-radius: 8px;
+      padding: 15px;
+      margin-bottom: 15px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+    .status div, .data p {
+      margin: 5px 0;
+    }
+    .controls label {
+      display: block;
+      margin: 8px 0;
+    }
+    button {
+      margin-top: 8px;
+      padding: 8px 12px;
+      border: none;
+      background: #0066cc;
+      color: white;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover { background: #005bb5; }
+    textarea {
+      width: 100%;
+      background: #222;
+      color: #0f0;
+      border-radius: 4px;
+      padding: 8px;
+      font-family: monospace;
+      box-sizing: border-box;
+      margin-bottom: 20px;
+    }
+    textarea.log {
+      height: 40%;
+    }
+  </style>
+</head>
+<body>
+  <div class="left-col">
+    <h2>Micromouse Dashboard</h2>
+
+    <div class="status">
+      <h3>Status</h3>
+      <div>Connection: <span id="conn">❌</span></div>
+      <div>Left Sensor: <span id="initL">–</span></div>
+      <div>Front Sensor: <span id="initF">–</span></div>
+      <div>Right Sensor: <span id="initR">–</span></div>
+    </div>
+
+    <div class="data">
+      <h3>Data</h3>
+      <p>Left Ticks: <strong id="lt">0</strong></p>
+      <p>Right Ticks: <strong id="rt">0</strong></p>
+      <p>Sensor L: <strong id="sl">–</strong></p>
+      <p>Sensor F: <strong id="sf">–</strong></p>
+      <p>Sensor R: <strong id="sr">–</strong></p>
+    </div>
+
+  </div>
+
+  <div class="right-col">
+    <div class="controls">
+      <h3>Motor Control</h3>
+      <label>Left Speed: <input type="number" id="sa" value="0"></label>
+      <label>Right Speed: <input type="number" id="sb" value="0"></label>
+      <button onclick="updateMotors()">Update Motors</button>
+      <button onclick="stopMotors()">Stop Motors</button>
+
+      <h3>Sensor Timing Budget</h3>
+      <label>Timing Budget (ms): <input type="number" id="tb" value="33"></label>
+      <button onclick="updateTB()">Update Timing</button>
+    </div>
+
+    <h3>DEBUG LOG</h3>
+    <textarea id="debugLog" class="log" readonly></textarea>
+  </div>
+
+  <script>
+    const connEl      = document.getElementById('conn');
+    const motorLogEl  = document.getElementById('motorLog');
+    const debugLogEl  = document.getElementById('debugLog');
+    const sa          = document.getElementById('sa');
+    const sb          = document.getElementById('sb');
+    const tb          = document.getElementById('tb');
+
+    const ws = new WebSocket('ws://esp32.local/ws');
+
+    ws.onopen = ()   => { connEl.textContent = '✅'; };
+    ws.onclose = ()  => { connEl.textContent = '❌'; };
+
+    ws.onmessage = e => {
+      const d = JSON.parse(e.data);
+
+      // Update status & data
+      document.getElementById('initL').textContent = d.initL ? '✅' : '❌';
+      document.getElementById('initF').textContent = d.initF ? '✅' : '❌';
+      document.getElementById('initR').textContent = d.initR ? '✅' : '❌';
+      ['lt','rt','sl','sf','sr'].forEach(k => {
+        if (d[k] !== undefined) {
+          document.getElementById(k).textContent = d[k];
+        }
+      });
+
+      // Split debug messages
+      if (d.debug) {
+        d.debug.trim().split('\n').forEach(line => {
+          if (!line) return;
+          if (/speed|Motors?/.test(line)) {
+            motorLogEl.value += line + '\n';
+            motorLogEl.scrollTop = motorLogEl.scrollHeight;
+          } else {
+            debugLogEl.value += line + '\n';
+            debugLogEl.scrollTop = debugLogEl.scrollHeight;
+          }
+        });
+      }
+    };
+
+    function updateMotors() {
+      ws.send(JSON.stringify({
+        sa: parseInt(sa.value),
+        sb: parseInt(sb.value)
+      }));
+    }
+    function stopMotors() {
+      ws.send(JSON.stringify({ stop: true }));
+    }
+    function updateTB() {
+      ws.send(JSON.stringify({ tb: parseInt(tb.value) }));
+    }
+  </script>
+</body>
+</html>

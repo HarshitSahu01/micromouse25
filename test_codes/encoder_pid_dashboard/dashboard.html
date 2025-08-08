@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Encoder PID Dashboard</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0; padding: 0;
+      display: flex; height: 100vh;
+    }
+    .left-col, .right-col {
+      flex: 1;
+      padding: 20px;
+      box-sizing: border-box;
+      overflow-y: auto;
+    }
+    .left-col { background: #f0f4f8; }
+    .right-col { background: #fff; border-left: 1px solid #ccc; }
+
+    label { display: block; margin: 10px 0 5px; }
+    input { width: 100%; padding: 6px; margin-bottom: 10px; }
+    button {
+      margin-right: 10px;
+      padding: 10px 20px;
+      background: #007BFF; color: white;
+      border: none; border-radius: 5px;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #0056b3;
+    }
+    textarea {
+      width: 100%;
+      height: 200px;
+      font-family: monospace;
+      padding: 10px;
+      resize: vertical;
+    }
+  </style>
+</head>
+<body>
+  <div class="left-col">
+    <h2>Encoder PID Control</h2>
+    <label>Base Speed</label>
+    <input type="number" id="baseSpeed" value="100" />
+    <label>Max Speed</label>
+    <input type="number" id="maxSpeed" value="255" />
+    <label>Kp</label>
+    <input type="number" id="kp" value="1.0" step="0.1" />
+    <label>Ki</label>
+    <input type="number" id="ki" value="0.0" step="0.1" />
+    <label>Kd</label>
+    <input type="number" id="kd" value="0.0" step="0.1" />
+    <button onclick="updatePID()">Update PID</button>
+    <button onclick="toggleBot()"><span id="botBtn">Start</span> Bot</button>
+  </div>
+  <div class="right-col">
+    <h2>MOTOR CONTROL AND DEBUG LOG</h2>
+    <textarea id="log" readonly></textarea>
+  </div>
+
+  <script>
+    let ws;
+    let botRunning = false;
+
+    function connectWebSocket() {
+      ws = new WebSocket('ws://' + location.hostname + '/ws');
+      ws.onopen = () => appendLog('[✓] Connected to ESP32');
+      ws.onclose = () => appendLog('[!] Disconnected');
+      ws.onmessage = (event) => appendLog(event.data);
+    }
+
+    function updatePID() {
+      const data = {
+        base: parseInt(document.getElementById("baseSpeed").value),
+        max: parseInt(document.getElementById("maxSpeed").value),
+        kp: parseFloat(document.getElementById("kp").value),
+        ki: parseFloat(document.getElementById("ki").value),
+        kd: parseFloat(document.getElementById("kd").value)
+      };
+      ws.send(JSON.stringify(data));
+      appendLog("[→] Sent PID update");
+    }
+
+    function toggleBot() {
+      botRunning = !botRunning;
+      ws.send(JSON.stringify({ run: botRunning }));
+      document.getElementById("botBtn").textContent = botRunning ? "Stop" : "Start";
+      appendLog(`[→] Bot ${botRunning ? "started" : "stopped"}`);
+    }
+
+    function appendLog(msg) {
+      const log = document.getElementById("log");
+      log.value += msg + "\n";
+      log.scrollTop = log.scrollHeight;
+    }
+
+    window.onload = connectWebSocket;
+  </script>
+</body>
+</html>

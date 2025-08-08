@@ -1,0 +1,8 @@
+Kp: 42.00
+Ki: 140.00
+Kd: 3.15
+
+2000 ticks
+117+51 cm seedha
+31cm lateral shift
+200 ticks per 100 ms

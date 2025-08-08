@@ -1,22 +1,22 @@
-#define AIN1 16
-#define AIN2 17
+#define AIN1 17
+#define AIN2 16
 #define PWMA 4
 #define STBY 5
-#define BIN1 19
-#define BIN2 18
+#define BIN1 18
+#define BIN2 19
 #define PWMB 21
 
 // Encoder pins
-#define LEFT_ENC_A 23
-#define LEFT_ENC_B 22
-#define RIGHT_ENC_A 15 
-#define RIGHT_ENC_B 2
+#define LEFT_ENC_A 2
+#define LEFT_ENC_B 15
+#define RIGHT_ENC_A 22
+#define RIGHT_ENC_B 23
 
 volatile long leftTicks = 0;
 volatile long rightTicks = 0;
 
-int speedA = 0;
-int speedB = 0;
+int speedA = 255;
+int speedB = 255;
 
 void IRAM_ATTR leftEncoderISR() {
   bool a = digitalRead(LEFT_ENC_A);
