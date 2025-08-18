@@ -1,3 +1,6 @@
+#include "driver/pcnt.h"
+
+// ===== Motor Driver Pins =====
 #define AIN1 17
 #define AIN2 16
 #define PWMA 4
@@ -6,11 +9,15 @@
 #define BIN2 18
 #define PWMB 21
 
-// Encoder pins
+// ===== Encoder Pins =====
 #define LEFT_ENC_A 2
 #define LEFT_ENC_B 15
 #define RIGHT_ENC_A 22
 #define RIGHT_ENC_B 23
+
+// ===== PCNT Units =====
+#define PCNT_UNIT_LEFT  PCNT_UNIT_0
+#define PCNT_UNIT_RIGHT PCNT_UNIT_1
 
 volatile long leftTicks = 0;
 volatile long rightTicks = 0;
@@ -18,16 +25,25 @@ volatile long rightTicks = 0;
 int speedA = 255;
 int speedB = 255;
 
-void IRAM_ATTR leftEncoderISR() {
-  bool a = digitalRead(LEFT_ENC_A);
-  bool b = digitalRead(LEFT_ENC_B);
-  leftTicks += (a == b) ? 1 : -1;
-}
+// ==== Encoder setup with PCNT ====
+void setupEncoder(pcnt_unit_t unit, int pinA, int pinB) {
+  pcnt_config_t pcntConfig = {};
+  pcntConfig.pulse_gpio_num = pinA;   // Channel A
+  pcntConfig.ctrl_gpio_num = pinB;    // Channel B
+  pcntConfig.lctrl_mode = PCNT_MODE_REVERSE; // Reverse count if B = 0
+  pcntConfig.hctrl_mode = PCNT_MODE_KEEP;    // Keep direction if B = 1
+  pcntConfig.pos_mode = PCNT_COUNT_INC;      // Count up on rising A
+  pcntConfig.neg_mode = PCNT_COUNT_DEC;      // Count down on falling A
+  pcntConfig.counter_h_lim = 32767;
+  pcntConfig.counter_l_lim = -32768;
+  pcntConfig.unit = unit;
+  pcntConfig.channel = PCNT_CHANNEL_0;
 
-void IRAM_ATTR rightEncoderISR() {
-  bool a = digitalRead(RIGHT_ENC_A);
-  bool b = digitalRead(RIGHT_ENC_B);
-  rightTicks += (a == b) ? 1 : -1;
+  pcnt_unit_config(&pcntConfig);
+
+  pcnt_counter_pause(unit);
+  pcnt_counter_clear(unit);
+  pcnt_counter_resume(unit);
 }
 
 void setup() {
@@ -38,19 +54,15 @@ void setup() {
   pinMode(PWMB, OUTPUT); pinMode(BIN1, OUTPUT); pinMode(BIN2, OUTPUT);
   pinMode(STBY, OUTPUT); digitalWrite(STBY, HIGH);
 
-  // Encoder setup
-  pinMode(LEFT_ENC_A, INPUT_PULLUP);
-  pinMode(LEFT_ENC_B, INPUT_PULLUP);
-  pinMode(RIGHT_ENC_A, INPUT_PULLUP);
-  pinMode(RIGHT_ENC_B, INPUT_PULLUP);
-
-  attachInterrupt(digitalPinToInterrupt(LEFT_ENC_A), leftEncoderISR, RISING);
-  attachInterrupt(digitalPinToInterrupt(RIGHT_ENC_A), rightEncoderISR, RISING);
+  // Encoder setup with PCNT
+  setupEncoder(PCNT_UNIT_LEFT, LEFT_ENC_A, LEFT_ENC_B);
+  setupEncoder(PCNT_UNIT_RIGHT, RIGHT_ENC_A, RIGHT_ENC_B);
 
   Serial.println("Ready. Use 'a+200', 'b-150' to control motors.");
 }
 
 void loop() {
+  // ===== Motor speed control from Serial =====
   if (Serial.available()) {
     String input = Serial.readStringUntil('\n');
     input.trim();
@@ -67,9 +79,18 @@ void loop() {
 
   mspeed(speedA, speedB);
 
+  // ===== Read encoder counts every 200ms =====
   static unsigned long lastPrint = 0;
   if (millis() - lastPrint >= 200) {
     lastPrint = millis();
+
+    int16_t leftVal, rightVal;
+    pcnt_get_counter_value(PCNT_UNIT_LEFT, &leftVal);
+    pcnt_get_counter_value(PCNT_UNIT_RIGHT, &rightVal);
+
+    leftTicks = leftVal;
+    rightTicks = rightVal;
+
     Serial.print("Left Ticks: ");
     Serial.print(leftTicks);
     Serial.print("  Right Ticks: ");
@@ -77,6 +98,7 @@ void loop() {
   }
 }
 
+// ===== Motor speed control =====
 void mspeed(int a, int b) {
   // Left Motor (A)
   if (a >= 0) {

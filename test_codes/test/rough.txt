@@ -2,6 +2,9 @@ Kp: 42.00
 Ki: 140.00
 Kd: 3.15
 
+Best PID: Kp=1.678 Ki=-0.020 Kd=0.146
+Current params: 0.6979, 0.0081, 0.1331, 0.2445 | Error: 10.8297
+
 2000 ticks
 117+51 cm seedha
 31cm lateral shift
