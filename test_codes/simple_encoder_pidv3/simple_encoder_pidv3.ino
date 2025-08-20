@@ -1,112 +1,160 @@
-// ===== CONFIG =====
-const int targetTicksPerSec = 400;   // Target encoder ticks/sec
-const float Kp = 1.678;
-const float Ki = -0.020;
-const float Kd = 0.146;
-const int basePWM = 100;  // Base speed duty
-const int maxPWM  = 255;  // Max duty
+// ========== ENCODER PID WITH TWIDDLE AUTO TUNER ==========
 
-// ===== MOTOR PINS =====
-const int motorL_PWM = 25;
-const int motorL_DIR = 26;
-const int motorR_PWM = 27;
-const int motorR_DIR = 14;
+// --- Motor driver pins (replace with yours) ---
+#define AIN1 17
+#define AIN2 16
+#define PWMA 4
+#define BIN1 19
+#define BIN2 18
+#define PWMB 21
+#define STBY 5
 
-// ===== ENCODER PINS =====
-const int encL_A = 34;
-const int encR_A = 35;
+// --- Encoder pins (replace with yours) ---
+#define LEFT_ENC_A 2
+#define LEFT_ENC_B 15
+#define RIGHT_ENC_A 22
+#define RIGHT_ENC_B 23
 
-// ===== ENCODER VARIABLES =====
-volatile long ticksL = 0;
-volatile long ticksR = 0;
+// --- PID params ---
+float Kp = 1.0, Ki = 0.0, Kd = 0.1;
+float dp[3] = {0.5, 0.01, 0.1};
+float best_err = 1e9;
 
-// ===== PID VARIABLES =====
-float error_prev = 0;
-float integral = 0;
+// --- Encoder counters ---
+volatile long leftTicks = 0;
+volatile long rightTicks = 0;
 
-// ===== TIMER =====
-unsigned long lastTime = 0;
-unsigned long pidInterval = 100; // ms
+// --- Target speed (ticks per interval) ---
+int targetTicks = 50;
 
-void IRAM_ATTR encL_ISR() {
-  ticksL++;
+// --- PID state ---
+float integralL = 0, lastErrL = 0;
+float integralR = 0, lastErrR = 0;
+
+// ================== ENCODER ISR ==================
+void IRAM_ATTR leftEncISR() {
+  int b = digitalRead(LEFT_ENC_B);
+  if (b > 0) leftTicks++; else leftTicks--;
 }
 
-void IRAM_ATTR encR_ISR() {
-  ticksR++;
+void IRAM_ATTR rightEncISR() {
+  int b = digitalRead(RIGHT_ENC_B);
+  if (b > 0) rightTicks++; else rightTicks--;
 }
 
+// ================== MOTOR DRIVE ==================
+void driveMotorA(int speed) {
+  if (speed >= 0) {
+    digitalWrite(AIN1, HIGH); digitalWrite(AIN2, LOW);
+  } else {
+    digitalWrite(AIN1, LOW); digitalWrite(AIN2, HIGH);
+    speed = -speed;
+  }
+  analogWrite(PWMA, constrain(speed, 0, 255));
+}
+
+void driveMotorB(int speed) {
+  if (speed >= 0) {
+    digitalWrite(BIN1, HIGH); digitalWrite(BIN2, LOW);
+  } else {
+    digitalWrite(BIN1, LOW); digitalWrite(BIN2, HIGH);
+    speed = -speed;
+  }
+  analogWrite(PWMB, constrain(speed, 0, 255));
+}
+
+// ================== PID CONTROL ==================
+float pidControl(float Kp, float Ki, float Kd,
+                 float &integral, float &lastErr,
+                 int target, int actual) {
+  float error = target - actual;
+  integral += error;
+  float derivative = error - lastErr;
+  lastErr = error;
+  return Kp * error + Ki * integral + Kd * derivative;
+}
+
+// ================== RUN ONE TEST ==================
+float runTest(float Kp, float Ki, float Kd) {
+  integralL = integralR = 0;
+  lastErrL = lastErrR = 0;
+  long lastLeft = leftTicks;
+  long lastRight = rightTicks;
+  float totalError = 0;
+
+  for (int i = 0; i < 50; i++) { // ~50 cycles
+    delay(100); // 100ms interval
+
+    long curLeft = leftTicks;
+    long curRight = rightTicks;
+
+    int speedL = curLeft - lastLeft;
+    int speedR = curRight - lastRight;
+
+    lastLeft = curLeft;
+    lastRight = curRight;
+
+    float outL = pidControl(Kp, Ki, Kd, integralL, lastErrL, targetTicks, speedL);
+    float outR = pidControl(Kp, Ki, Kd, integralR, lastErrR, targetTicks, speedR);
+
+    driveMotorA((int)outL);
+    driveMotorB((int)outR);
+
+    totalError += abs(targetTicks - speedL) + abs(targetTicks - speedR);
+  }
+  return totalError;
+}
+
+// ================== TWIDDLE ==================
+void twiddle() {
+  float params[3] = {Kp, Ki, Kd};
+  float tolerance = dp[0] + dp[1] + dp[2];
+  if (tolerance < 0.001) return;
+
+  for (int i = 0; i < 3; i++) {
+    params[i] += dp[i];
+    float err = runTest(params[0], params[1], params[2]);
+
+    if (err < best_err) {
+      best_err = err;
+      dp[i] *= 1.1;
+    } else {
+      params[i] -= 2 * dp[i];
+      err = runTest(params[0], params[1], params[2]);
+      if (err < best_err) {
+        best_err = err;
+        dp[i] *= 1.1;
+      } else {
+        params[i] += dp[i];
+        dp[i] *= 0.9;
+      }
+    }
+  }
+  Kp = params[0]; Ki = params[1]; Kd = params[2];
+  Serial.printf("New PID: Kp=%.4f Ki=%.4f Kd=%.4f | Best Err=%.4f\n", Kp, Ki, Kd, best_err);
+}
+
+// ================== SETUP ==================
 void setup() {
   Serial.begin(115200);
+  pinMode(AIN1, OUTPUT); pinMode(AIN2, OUTPUT);
+  pinMode(BIN1, OUTPUT); pinMode(BIN2, OUTPUT);
+  pinMode(STBY, OUTPUT); digitalWrite(STBY, HIGH);
 
-  pinMode(motorL_PWM, OUTPUT);
-  pinMode(motorL_DIR, OUTPUT);
-  pinMode(motorR_PWM, OUTPUT);
-  pinMode(motorR_DIR, OUTPUT);
+  pinMode(LEFT_ENC_A, INPUT_PULLUP);
+  pinMode(LEFT_ENC_B, INPUT_PULLUP);
+  pinMode(RIGHT_ENC_A, INPUT_PULLUP);
+  pinMode(RIGHT_ENC_B, INPUT_PULLUP);
 
-  pinMode(encL_A, INPUT_PULLUP);
-  pinMode(encR_A, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(LEFT_ENC_A), leftEncISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(RIGHT_ENC_A), rightEncISR, RISING);
 
-  attachInterrupt(digitalPinToInterrupt(encL_A), encL_ISR, RISING);
-  attachInterrupt(digitalPinToInterrupt(encR_A), encR_ISR, RISING);
-
-  lastTime = millis();
-
-  Serial.println("PID Motor Control Starting...");
+  Serial.println("Starting Twiddle tuner...");
+  best_err = runTest(Kp, Ki, Kd);
 }
 
+// ================== LOOP ==================
 void loop() {
-  unsigned long now = millis();
-  if (now - lastTime >= pidInterval) {
-    lastTime = now;
-
-    // Calculate ticks in last interval
-    static long prevTicksL = 0;
-    static long prevTicksR = 0;
-
-    long currTicksL = ticksL;
-    long currTicksR = ticksR;
-
-    int deltaL = currTicksL - prevTicksL;
-    int deltaR = currTicksR - prevTicksR;
-
-    prevTicksL = currTicksL;
-    prevTicksR = currTicksR;
-
-    // Convert to ticks/sec
-    float ticksPerSecL = (deltaL * 1000.0) / pidInterval;
-    float ticksPerSecR = (deltaR * 1000.0) / pidInterval;
-
-    // --- PID based on difference ---
-    float speedError = (ticksPerSecL - ticksPerSecR); // balance
-    integral += speedError * (pidInterval / 1000.0);
-    float derivative = (speedError - error_prev) / (pidInterval / 1000.0);
-    float correction = Kp * speedError + Ki * integral + Kd * derivative;
-    error_prev = speedError;
-
-    // --- Speed control to reach targetTicksPerSec ---
-    float errorTargetL = targetTicksPerSec - ticksPerSecL;
-    float errorTargetR = targetTicksPerSec - ticksPerSecR;
-
-    int pwmL = basePWM + errorTargetL + correction;
-    int pwmR = basePWM + errorTargetR - correction;
-
-    // Constrain
-    pwmL = constrain(pwmL, 0, maxPWM);
-    pwmR = constrain(pwmR, 0, maxPWM);
-
-    setMotor(motorL_PWM, motorL_DIR, pwmL, true);
-    setMotor(motorR_PWM, motorR_DIR, pwmR, true);
-
-    // Print info
-    Serial.print("L_ticks/sec: "); Serial.print(ticksPerSecL);
-    Serial.print(" | R_ticks/sec: "); Serial.print(ticksPerSecR);
-    Serial.print(" | PWM_L: "); Serial.print(pwmL);
-    Serial.print(" | PWM_R: "); Serial.println(pwmR);
-  }
-}
-
-void setMotor(int pwmPin, int dirPin, int pwmVal, bool forward) {
-  digitalWrite(dirPin, forward ? HIGH : LOW);
-  analogWrite(pwmPin, pwmVal);
+  twiddle();
+  delay(500);
 }

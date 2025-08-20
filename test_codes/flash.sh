@@ -46,9 +46,9 @@ echo "[*] Uploading to ${PORT} via esptool.exe..."
   --chip esp32 \
   --port "${PORT}" \
   --baud "${BAUD}" \
-  --before default_reset \
-  --after hard_reset \
-  write_flash -z \
+  --before default-reset \
+  --after hard-reset \
+  write-flash -z \
   "${FLASH_OFFSET}" \
   "${BIN_PATH}"
 

@@ -1,58 +1,139 @@
-// reduced base
+#include <Arduino.h>
+
+// ===== Motor Driver Pins =====
 #define AIN1 17
 #define AIN2 16
 #define PWMA 4
-
-#define BIN1 18
-#define BIN2 19
+#define STBY 5
+#define BIN1 19
+#define BIN2 18
 #define PWMB 21
 
-#define STBY 5
-
+// ===== Encoder Pins =====
 #define LEFT_ENC_A 2
 #define LEFT_ENC_B 15
 #define RIGHT_ENC_A 22
 #define RIGHT_ENC_B 23
 
-#define BTN 35
+// ===== Globals =====
+volatile long leftTicks = 0;
+volatile long rightTicks = 0;
 
-volatile long leftTicksRaw = 0;
-volatile long rightTicksRaw = 0;
+float Kp = 0, Ki = 0, Kd = 0;
+int basePWM = 150;
 
-long leftTicks = 0;
-long rightTicks = 0;
+unsigned long lastSampleTime = 0;
+int sampleInterval = 50; // ms
 
-float leftSpeed = 0;
-float rightSpeed = 0;
+// For auto-tuning
+float Ku = 0;
+float Tu = 0;
+bool oscillating = false;
+unsigned long lastZeroCross = 0;
+int zeroCrossCount = 0;
 
-// Default base speed (reduced from 200.0 to 120.0)
-float targetSpeed = 120.0;  
-float driftPenalty = 0.18;
-
-// Slightly reduced PID gains for smoother control
-float Kp = 35, Ki = 110, Kd = 3.0;
-
-float leftErrSum = 0, rightErrSum = 0;
-float lastLeftErr = 0, lastRightErr = 0;
-
-unsigned long lastUpdate = 0;
-
-// Flag for detecting turns (replace with actual maze logic)
-bool isTurning = false;
-
-// Encoder ISR
-void IRAM_ATTR leftEncoderISR() {
-  bool a = digitalRead(LEFT_ENC_A);
-  bool b = digitalRead(LEFT_ENC_B);
-  leftTicksRaw += (a == b) ? 1 : -1;
+// ===== Encoder ISRs =====
+void IRAM_ATTR leftISR() {
+  int b = digitalRead(LEFT_ENC_B);
+  if (b > 0) leftTicks++; else leftTicks--;
 }
-void IRAM_ATTR rightEncoderISR() {
-  bool a = digitalRead(RIGHT_ENC_A);
-  bool b = digitalRead(RIGHT_ENC_B);
-  rightTicksRaw += (a == b) ? 1 : -1;
+void IRAM_ATTR rightISR() {
+  int b = digitalRead(RIGHT_ENC_B);
+  if (b > 0) rightTicks++; else rightTicks--;
 }
 
-void setupMotorPins() {
+// ===== Motor Control =====
+void setMotor(int pwmLeft, int pwmRight) {
+  digitalWrite(STBY, HIGH);
+
+  // Left motor
+  if (pwmLeft >= 0) {
+    digitalWrite(AIN1, HIGH); digitalWrite(AIN2, LOW);
+  } else {
+    digitalWrite(AIN1, LOW); digitalWrite(AIN2, HIGH);
+    pwmLeft = -pwmLeft;
+  }
+  analogWrite(PWMA, constrain(pwmLeft, 0, 255));
+
+  // Right motor
+  if (pwmRight >= 0) {
+    digitalWrite(BIN1, HIGH); digitalWrite(BIN2, LOW);
+  } else {
+    digitalWrite(BIN1, LOW); digitalWrite(BIN2, HIGH);
+    pwmRight = -pwmRight;
+  }
+  analogWrite(PWMB, constrain(pwmRight, 0, 255));
+}
+
+// ===== ZNF Auto-Tune =====
+void znfAutoTune() {
+  Serial.println("Starting ZNF auto-tune...");
+  delay(2000);
+
+  for (float trialKp = 0.5; trialKp < 20; trialKp += 0.5) {
+    Serial.print("Testing Kp = ");
+    Serial.println(trialKp);
+
+    // Reset
+    leftTicks = rightTicks = 0;
+    zeroCrossCount = 0;
+    lastZeroCross = 0;
+    oscillating = false;
+
+    unsigned long start = millis();
+    while (millis() - start < 5000) { // 5 sec trial
+      // Simple proportional control
+      long error = leftTicks - rightTicks;
+      int correction = trialKp * error;
+
+      int pwmL = basePWM - correction;
+      int pwmR = basePWM + correction;
+
+      setMotor(pwmL, pwmR);
+
+      // Detect oscillation (sign change of error)
+      static long lastError = 0;
+      if ((error > 0 && lastError <= 0) || (error < 0 && lastError >= 0)) {
+        if (!oscillating) {
+          oscillating = true;
+          zeroCrossCount = 0;
+        } else {
+          if (zeroCrossCount == 0) lastZeroCross = millis();
+          else if (zeroCrossCount == 5) { // 5 crossings → stable oscillation
+            Tu = (millis() - lastZeroCross) / 5.0 / 1000.0; // sec
+            Ku = trialKp;
+            goto done; // Found Ku, Tu
+          }
+          zeroCrossCount++;
+        }
+      }
+      lastError = error;
+      delay(20);
+    }
+  }
+done:
+  setMotor(0, 0);
+  if (Ku > 0 && Tu > 0) {
+    Serial.print("Ku = "); Serial.println(Ku);
+    Serial.print("Tu = "); Serial.println(Tu);
+
+    // Ziegler–Nichols PID
+    Kp = 0.6 * Ku;
+    Ki = 1.2 * Ku / Tu;
+    Kd = 0.075 * Ku * Tu;
+
+    Serial.println("== Tuned PID ==");
+    Serial.print("Kp = "); Serial.println(Kp);
+    Serial.print("Ki = "); Serial.println(Ki);
+    Serial.print("Kd = "); Serial.println(Kd);
+  } else {
+    Serial.println("Failed to find Ku/Tu");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
   pinMode(AIN1, OUTPUT);
   pinMode(AIN2, OUTPUT);
   pinMode(PWMA, OUTPUT);
@@ -61,128 +142,19 @@ void setupMotorPins() {
   pinMode(PWMB, OUTPUT);
   pinMode(STBY, OUTPUT);
   digitalWrite(STBY, HIGH);
-}
 
-void setupEncoders() {
   pinMode(LEFT_ENC_A, INPUT_PULLUP);
   pinMode(LEFT_ENC_B, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(LEFT_ENC_A), leftEncoderISR, RISING);
-
   pinMode(RIGHT_ENC_A, INPUT_PULLUP);
   pinMode(RIGHT_ENC_B, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(RIGHT_ENC_A), rightEncoderISR, RISING);
-}
 
-void setLeftMotor(int speed) {
-  if (speed > 0) {
-    digitalWrite(AIN1, HIGH);
-    digitalWrite(AIN2, LOW);
-  } else if (speed < 0) {
-    digitalWrite(AIN1, LOW);
-    digitalWrite(AIN2, HIGH);
-  } else {
-    digitalWrite(AIN1, LOW);
-    digitalWrite(AIN2, LOW);
-  }
-  analogWrite(PWMA, min(abs(speed), 255));
-}
+  attachInterrupt(digitalPinToInterrupt(LEFT_ENC_A), leftISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(RIGHT_ENC_A), rightISR, RISING);
 
-void setRightMotor(int speed) {
-  if (speed > 0) {
-    digitalWrite(BIN1, HIGH);
-    digitalWrite(BIN2, LOW);
-  } else if (speed < 0) {
-    digitalWrite(BIN1, LOW);
-    digitalWrite(BIN2, HIGH);
-  } else {
-    digitalWrite(BIN1, LOW);
-    digitalWrite(BIN2, LOW);
-  }
-  analogWrite(PWMB, min(abs(speed), 255));
-}
-
-void setup() {
-  Serial.begin(115200);
-  setupMotorPins();
-  setupEncoders();
-  Serial.println("PID Motor Control Started");
-  pinMode(BTN, INPUT); // Button 1
-  while (digitalRead(BTN) == LOW) {
-    // Wait for button press to start
-  }
-  Serial.println("Button pressed, starting control loop...");
   delay(2000);
+  znfAutoTune();
 }
 
 void loop() {
-  unsigned long now = millis();
-  leftTicks = leftTicksRaw * driftPenalty;
-  rightTicks = rightTicksRaw;
-
-  // Stop condition
-  if (rightTicks > 2000 || leftTicks > 2000) {
-    Serial.println("Stopping bot...");
-    setLeftMotor(0);
-    setRightMotor(0);
-    while (1) {
-      Serial.print("Ticks L: "); Serial.print(leftTicks);
-      Serial.print(" | R: "); Serial.println(rightTicks);
-      delay(500);
-
-      if (digitalRead(BTN) == 1) {
-        leftTicksRaw = 0;
-        rightTicksRaw = 0;
-        delay(2000);
-        break;
-      }
-    }
-  }
-
-  // Dynamic speed control
-  if (isTurning) {
-    targetSpeed = 100.0;  // Slow down for turns
-  } else {
-    targetSpeed = 120.0;  // Base speed for straights
-  }
-
-  if (now - lastUpdate >= 100) {
-    lastUpdate = now;
-
-    static long prevLeftTicks = 0;
-    static long prevRightTicks = 0;
-
-    long deltaLeft = leftTicks - prevLeftTicks;
-    long deltaRight = rightTicks - prevRightTicks;
-
-    prevLeftTicks = leftTicks;
-    prevRightTicks = rightTicks;
-
-    // PID for left motor
-    float leftErr = targetSpeed - deltaLeft;
-    leftErrSum += leftErr;
-    float leftDeriv = leftErr - lastLeftErr;
-    lastLeftErr = leftErr;
-
-    float leftPWM = Kp * leftErr + Ki * leftErrSum + Kd * leftDeriv;
-
-    // PID for right motor
-    float rightErr = targetSpeed - deltaRight;
-    rightErrSum += rightErr;
-    float rightDeriv = rightErr - lastRightErr;
-    lastRightErr = rightErr;
-
-    float rightPWM = Kp * rightErr + Ki * rightErrSum + Kd * rightDeriv;
-
-    // Apply motor speeds
-    setLeftMotor((int)leftPWM);
-    setRightMotor((int)rightPWM);
-
-    // Debug
-    Serial.print("Ticks L: "); Serial.print(deltaLeft);
-    Serial.print(" | R: "); Serial.print(deltaRight);
-    Serial.print(" | PWM L: "); Serial.print(leftPWM);
-    Serial.print(" | PWM R: "); Serial.print(rightPWM);
-    Serial.print(" | LeftTicks: "); Serial.print(leftTicks);
-    Serial.print(" | RightTicks: "); Serial.println(rightTicks);
-  }
+  // After tuning, bot is idle. You can copy Kp, Ki, Kd into your main PID code.
 }
