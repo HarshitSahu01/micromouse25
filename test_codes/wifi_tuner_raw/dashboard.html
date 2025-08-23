@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>PID Dashboard</title>
+  <style>
+    body { font-family: Arial; margin: 20px; }
+    label, button { display:block; margin:8px 0; }
+    textarea { width:100%; height:200px; background:#222; color:#0f0; }
+  </style>
+</head>
+<body>
+  <h2>PID Control Dashboard</h2>
+
+  <label>Start Distance (cm): <input type="number" id="startDist" value="50"></label>
+  <button onclick="startRun()">Start</button>
+  <button onclick="stopRun()">Stop</button>
+
+  <h3>PID Constants</h3>
+  <label>Kp: <input type="number" id="Kp" step="0.01" value="1.0"></label>
+  <label>Ki: <input type="number" id="Ki" step="0.01" value="0.0"></label>
+  <label>Kd: <input type="number" id="Kd" step="0.01" value="0.0"></label>
+  <button onclick="updatePID()">Update PID</button>
+
+  <h3>Debug Log</h3>
+  <textarea id="debugLog" readonly></textarea>
+
+  <script>
+    const debugLogEl = document.getElementById('debugLog');
+    const ws = new WebSocket('ws://esp32.local/ws');
+
+    ws.onopen = () => console.log('WS connected');
+    ws.onclose = () => console.log('WS disconnected');
+
+    ws.onmessage = e => {
+      const d = JSON.parse(e.data);
+      if(d.debug){
+        debugLogEl.value += d.debug + '\n';
+        debugLogEl.scrollTop = debugLogEl.scrollHeight;
+      }
+    };
+
+    function startRun(){
+      const val = parseFloat(document.getElementById('startDist').value);
+      ws.send(JSON.stringify({ start: val }));
+    }
+    function stopRun(){
+      ws.send(JSON.stringify({ stop: true }));
+    }
+    function updatePID(){
+      ws.send(JSON.stringify({
+        Kp: parseFloat(document.getElementById('Kp').value),
+        Ki: parseFloat(document.getElementById('Ki').value),
+        Kd: parseFloat(document.getElementById('Kd').value)
+      }));
+    }
+  </script>
+</body>
+</html>

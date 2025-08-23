@@ -74,7 +74,7 @@ int maze[MAZESIZE][MAZESIZE];
 // int dummymaze[MAZESIZE][MAZESIZE];
 int flood[MAZESIZE][MAZESIZE];
 int posX = 0, posY = 0; // Current position in the maze
-int orientation = 3; 
+int orientation = 0; 
 
 int dummymaze[MAZESIZE][MAZESIZE] = {
     0, 2, 8, 0, 0, 0, 0, 0,
@@ -221,19 +221,10 @@ void floodfill() {
     queue<pair<int, int>> q;
     q.push({targetX, targetY});
 
-        for (int i = 0; i < MAZESIZE; i++) {
-        for (int j = 0; j < MAZESIZE; j++) {
-            cout << flood[i][j] << ' ';
-        }
-        cout << '\n';
-    }
-
     while (not q.empty()) {
         auto [x, y] = q.front();
-        cout << "exploring " << x << ' ' << y << '\n';
         q.pop();
 
-        cout << (maze[x][y]&8) << ' ' << ((maze[x][y]&8) != 8) << '\n';
         if (x > 0 and flood[x-1][y] == -1 and (maze[x][y]&1) != 1) {
             flood[x-1][y] = flood[x][y] + 1;
             q.push({x-1, y});
@@ -255,28 +246,28 @@ void floodfill() {
 
 int rotationDirections[4] = { 0, 90, 180, -90 }; // 0: forward, 1: right, 2: backward, 3: left
 int nextBlock() {
-    cout << "Meow\n";
     int target = -1;
+    int oldOrient = orientation;
     if (posX > 0 and flood[posX-1][posY] == flood[posX][posY] - 1) {
-        target = 3; 
-        posX -= 1; // Move left
-        orientation = 3;
-    } else if (posX < MAZESIZE - 1 and flood[posX+1][posY] == flood[posX][posY] - 1) {
-        target = 1; 
-        posX += 1; // Move right
-        orientation = 1;
-    } else if (posY > 0 and flood[posX][posY-1] == flood[posX][posY] - 1) {
         target = 0; 
-        posY -= 1; // Move forward
+        posX -= 1; // Move left
         orientation = 0;
-    } else if (posY < MAZESIZE - 1 and flood[posX][posY+1] == flood[posX][posY] - 1) {
+    } else if (posX < MAZESIZE - 1 and flood[posX+1][posY] == flood[posX][posY] - 1) {
         target = 2; 
-        posY += 1; // Move backward
+        posX += 1; // Move right
         orientation = 2;
+    } else if (posY > 0 and flood[posX][posY-1] == flood[posX][posY] - 1) {
+        target = 3; 
+        posY -= 1; // Move forward
+        orientation = 3;
+    } else if (posY < MAZESIZE - 1 and flood[posX][posY+1] == flood[posX][posY] - 1) {
+        target = 1; 
+        posY += 1; // Move backward
+        orientation = 1;
     }
     if (target == -1) return -1;
-    cout << target << ' ' << rotationDirections[(target-orientation) % 4] << "Meow\n";
-    return rotationDirections[(target-orientation) % 4];
+    // cout << target << ' ' << rotationDirections[(orientation - oldOrient) % 4] << "Meow\n"; 
+    return rotationDirections[(orientation - oldOrient+4) % 4];
 }
 
 float encoderCountToDegrees = 0.9;
@@ -389,20 +380,19 @@ void setup() {
 }
 
 void loop() {
-    cout << "HEre\n";
+    cout << "\nCurrently at " << posX << ' ' << posY << ' ' << orientation << '\n';
     identifyBlock();
     floodfill();
 
-    for (int i = 0; i < MAZESIZE; i++) {
-        for (int j = 0; j < MAZESIZE; j++) {
-            cout << flood[i][j] << ' ';
-        }
-        cout << '\n';
-    }
+    // for (int i = 0; i < MAZESIZE; i++) {
+    //     for (int j = 0; j < MAZESIZE; j++) {
+    //         cout << flood[i][j] << ' ';
+    //     }
+    //     cout << '\n';
+    // }
 
     int degrees = nextBlock();
-    cout << "HEre " << degrees << '\n';
-    while (degrees = -1) {
+    while (degrees == -1) {
         cout << "End of maze";
         while (1) {}
         // Serial.println("End of the maze");
@@ -424,7 +414,9 @@ int main() {
     //     }
     //     cout << '\n';
     // }
-    loop();
+    for (int i = 0; i <100; i++) {
+        loop();
+    }
 
 }
 

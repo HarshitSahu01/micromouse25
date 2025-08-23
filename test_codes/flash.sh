@@ -3,7 +3,7 @@
 # --- Configuration ---
 BOARD_FQBN="esp32:esp32:esp32"
 BUILD_DIR="build"
-PORT="COM2"
+PORT="${2:-COM2}"
 BAUD=921600
 FLASH_OFFSET=0x0  # Arduino sketch default offset
 ESPTOOL_EXE="esptool.exe"  # ⚠️ Update this path!

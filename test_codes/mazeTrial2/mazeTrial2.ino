@@ -65,113 +65,152 @@ void IRAM_ATTR rightEncoderISR() {
 
 int baseSpeed = 150;
 
-const int MAZESIZE = 8;
+const int MAZESIZE = 5;
 int maze[MAZESIZE][MAZESIZE];
 int flood[MAZESIZE][MAZESIZE];
 int posX = 0, posY = 0; // Current position in the maze
-int orientation = 3; 
+int orientation = 2; 
 
+// int dummymaze[MAZESIZE][MAZESIZE] = {
+//     0, 0, 0, 0, 0,
+//     0, 0, 0, 0, 0,
+//     0, 0, 0, 0, 0,
+//     0, 0, 0, 0, 0,
+//     0, 0, 0, 0, 0
+// };
 int dummymaze[MAZESIZE][MAZESIZE] = {
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0
+    11, 13, 3, 9, 3,
+    8, 1, 0, 4, 6,
+    10, 10, 8, 5, 3,
+    10, 8, 0, 3, 10,
+    14, 12, 6, 14, 14
 };
 
-// Tune this once you calibrate encoders!
-static const float TICKS_PER_CM = 11.43;   // <-- measure later
-static const int   MOVE_CM       = 25;
-static const int   BASE_PWM      = 150;
-static const int   STOP_TOL_TICKS = 5;
-static const int   FRONT_STOP_MM  = 80;    // stop if front wall closer than this
 
-// PID gains (initial guess)
-static const float KP = 0.4f;
-static const float KI = 0.001f;
-static const float KD = 0.1f;
+// ---------------- ToF sensor setup ----------------
+const uint8_t sensorCount = 3;
+const uint8_t xshutPins[sensorCount] = { 13, 25, 27 }; // L, R, F
+VL53L1X sensors[sensorCount];
 
-// Desired wall offset (half of 25 cm cell ≈ 125 mm, we keep ~120 mm to avoid scraping)
-static const int DESIRED_WALL_MM = 120;
-static const int VALID_MIN_MM = 50;
-static const int VALID_MAX_MM = 300;
+// ---------------- PID variables ----------------
+float wallKp = 1.05;   // start small
+float wallKi = 0.001;  // start near zero
+float wallKd = 0.2;   // start small
 
-inline bool valid_mm(int d) { return d >= VALID_MIN_MM && d <= VALID_MAX_MM; }
+float wallError = 0;
+float wallPrev  = 0;
+float wallInt   = 0;
+float wallPIDValue = 0;
 
+
+// ---------------- Distances ----------------
+int distLeft, distRight, distFront;
+
+void updateSensors() {
+  distLeft  = sensors[0].read();
+  distRight = sensors[1].read();
+  distFront = sensors[2].read();
+}
+
+// ---------------- Both-Wall PID ----------------
+void runWallPID(int dL, int dR) {
+  wallError = dL - dR;               // error = difference
+  wallInt += wallError;              // accumulate
+  wallInt = constrain(wallInt, -1000, 1000); // anti-windup
+  float wallDeriv = wallError - wallPrev;
+  wallPrev = wallError;
+
+  wallPIDValue = wallKp * wallError + wallKi * wallInt + wallKd * wallDeriv;
+
+  int leftSpeed  = constrain(baseSpeed - wallPIDValue, 0, 255);
+  int rightSpeed = constrain(baseSpeed + wallPIDValue, 0, 255);
+
+  mspeed(leftSpeed, rightSpeed);
+}
+
+
+int targetRightDist = 80; // mm
+void runRightWallPID(int dR) {
+  int error =  targetRightDist - dR;         // error = actual - desired distance
+  wallInt += error;                        // integral term
+  wallInt = constrain(wallInt, -1000, 1000); // anti-windup
+  float deriv = error - wallPrev;          // derivative term
+  wallPrev = error;
+
+  float pidVal = wallKp * error + wallKi * wallInt + wallKd * deriv;
+
+  int leftSpeed  = constrain(baseSpeed - pidVal, 0, 255);  // slow down if too close
+  int rightSpeed = constrain(baseSpeed + pidVal, 0, 255);  // speed up opposite wheel
+
+  mspeed(leftSpeed, rightSpeed);
+
+  // Debug
+}
+
+
+int targetLeftDist = 80; // mm
+void runLeftWallPID(int dL) {
+  int error = dL - targetLeftDist;         // error = actual - desired distance
+  wallInt += error;                        // integral term
+  wallInt = constrain(wallInt, -1000, 1000); // anti-windup
+  float deriv = error - wallPrev;          // derivative term
+  wallPrev = error;
+
+  float pidVal = wallKp * error + wallKi * wallInt + wallKd * deriv;
+
+  int leftSpeed  = constrain(baseSpeed - pidVal, 0, 255);  // slow down if too close
+  int rightSpeed = constrain(baseSpeed + pidVal, 0, 255);  // speed up opposite wheel
+
+  mspeed(leftSpeed, rightSpeed);
+
+  // Debug
+}
+
+void runEncoderPID() {
+  wallError = leftTicks - rightTicks;               // error = difference
+  wallInt += wallError;              // accumulate
+  wallInt = constrain(wallInt, -1000, 1000); // anti-windup
+  float wallDeriv = wallError - wallPrev;
+  wallPrev = wallError;
+
+  wallPIDValue = wallKp * wallError + wallKi * wallInt + wallKd * wallDeriv;
+
+  int leftSpeed  = constrain(baseSpeed - wallPIDValue, 0, 255);
+  int rightSpeed = constrain(baseSpeed + wallPIDValue, 0, 255);
+
+  mspeed(leftSpeed, rightSpeed);
+}
+
+
+float cmToEncoderTicks = 11.43;
 void moveForward() {
-  long targetTicks = (long)(MOVE_CM * TICKS_PER_CM + 0.5f);
-  leftTicks = 0;
-  rightTicks = 0;
-
-  // PID vars
-  float errPrev = 0, errInt = 0;
-  unsigned long tPrev = micros();
-
-  while (true) {
-    // timing
-    unsigned long tNow = micros();
-    float dt = (tNow - tPrev) * 1e-6f;
-    if (dt < 0.005f) continue; // run ~200Hz
-    tPrev = tNow;
-
-    // encoder progress
-    long L = leftTicks;
-    long R = rightTicks;
-    long avg = (L + R) / 2;
-    long remain = targetTicks - avg;
-
-    // stop if target reached
-    if (remain <= STOP_TOL_TICKS) break;
-
-    // stop if front wall too close
-    int dFront = sensor2.read();
-    if (valid_mm(dFront) && dFront < FRONT_STOP_MM) {
-      break;
+    int target = cmToEncoderTicks * 25; // 25 cm
+    leftTicks = rightTicks = 0;
+    int thresh = 150;
+    mspeed(baseSpeed, baseSpeed);
+    print("Moving forward 25 cm, target ", target);
+        Serial.printf("L: %d, R: %d, F: %d TL: %d, TR: %d\n", distLeft, distRight, distFront, leftTicks, rightTicks);
+    while (abs(leftTicks) < target and abs(rightTicks) < target) {
+        updateSensors();
+        Serial.printf("L: %d, R: %d, F: %d TL: %d, TR: %d\n", distLeft, distRight, distFront, leftTicks, rightTicks);
+        // runWallPID(distLeft, distRight);
+        float isWallLeft = (distLeft < thresh);
+        float isWallRight = (distRight < thresh);
+        if (isWallLeft and isWallRight) {
+            runWallPID(distLeft, distRight);
+            Serial.println("Both walls");
+        } else if (isWallLeft) {
+            runLeftWallPID(distLeft);
+            Serial.println("Left walls");
+        } else if (isWallRight) {
+            runRightWallPID(distRight);
+            Serial.println("Right wall");
+        } else {
+            runEncoderPID();
+        }
+        delay(200);
     }
-
-    // read side walls
-    int dLeft  = sensor1.read();
-    int dRight = sensor3.read();
-    bool hasLeft  = valid_mm(dLeft);
-    bool hasRight = valid_mm(dRight);
-
-    // compute lateral error
-    float e = 0.0f;
-    if (hasLeft && hasRight) {
-      // center in corridor
-      e = (float)(dRight - dLeft);
-    } else if (hasLeft) {
-      e = (float)(DESIRED_WALL_MM - dLeft);
-    } else if (hasRight) {
-      e = (float)(dRight - DESIRED_WALL_MM);
-    } else {
-      // no wall → use encoder diff
-      e = (float)(R - L);
-    }
-
-    // PID steering
-    errInt += e * dt;
-    float dErr = (e - errPrev) / max(dt, 1e-4f);
-    errPrev = e;
-    float steer = KP * e + KI * errInt + KD * dErr;
-
-    // wheel commands
-    int leftCmd  = BASE_PWM + (int)steer;
-    int rightCmd = BASE_PWM - (int)steer;
-
-    // clamp
-    leftCmd  = constrain(leftCmd, -255, 255);
-    rightCmd = constrain(rightCmd, -255, 255);
-
-    mspeed(leftCmd, rightCmd);
-  }
-
-  // stop motors
-  mspeed(0, 0);
-  delay(20);
+    mspeed(0, 0);
 }
 
 void identifyBlock() {
@@ -187,25 +226,26 @@ void identifyBlock() {
     //     b[i] = a[(i - orientation+4) % 4];
     // }
 
-    b[0] = dummymaze[posX][posY] & 1 == 1;
-    b[1] = dummymaze[posX][posY] & 2 == 2;
-    b[2] = dummymaze[posX][posY] & 4 == 4;
-    b[3] = dummymaze[posX][posY] & 8 == 8;
-    
+    b[0] = (dummymaze[posX][posY] & 1) == 1;
+    b[1] = (dummymaze[posX][posY] & 2) == 2;
+    b[2] = (dummymaze[posX][posY] & 4) == 4;
+    b[3] = (dummymaze[posX][posY] & 8) == 8;
+
     int type = 8 * b[3] + 4 * b[2] + 2 * b[1] + b[0];
     maze[posX][posY] = type;
     if (posX > 0) {
-        maze[posX-1][posY] |= (b[3] ? 8 : 0); // left wall
+        maze[posX-1][posY] |= (b[0] ? 4 : 0); // left wall
     }
     if (posX < MAZESIZE - 1) {
-        maze[posX+1][posY] |= (b[1] ? 2 : 0); // right wall
+        maze[posX+1][posY] |= (b[2] ? 1 : 0); // right wall
     }
     if (posY > 0) {
-        maze[posX][posY-1] |= (b[0] ? 4 : 0); // front wall
+        maze[posX][posY-1] |= (b[3] ? 2 : 0); // front wall
     }
     if (posY < MAZESIZE - 1) {
-        maze[posX][posY+1] |= (b[2] ? 1 : 0); // back wall
+        maze[posX][posY+1] |= (b[1] ? 8 : 0); // back wall
     }
+    Serial.printf("(%d, %d) is of type %d\n", posX, posY, maze[posX][posY]);
 }
 
 void floodfill() {
@@ -282,7 +322,7 @@ void rotate(int degree) {
             mspeed(300, 0);
             rotatingRight = false;
         }
-        print("Left ticks: ", leftTicks, " Right ticks: ", rightTicks);
+        // print("Left ticks: ", leftTicks, " Right ticks: ", rightTicks);
         delay(10);
     }
     mspeed(0, 0);
@@ -332,17 +372,16 @@ void setup() {
 
   // --- Step 5: Configure all sensors ---
   sensor1.setDistanceMode(VL53L1X::Medium);
-  sensor1.setMeasurementTimingBudget(33000); // 33 ms
-  sensor1.startContinuous(33);
+  sensor1.setMeasurementTimingBudget(20000); // 22 ms
+  sensor1.startContinuous(20);
 
   sensor2.setDistanceMode(VL53L1X::Medium);
-  sensor2.setMeasurementTimingBudget(33000);
-  sensor2.startContinuous(33);
+  sensor2.setMeasurementTimingBudget(20000);
+  sensor2.startContinuous(20);
 
   sensor3.setDistanceMode(VL53L1X::Medium);
-  sensor3.setMeasurementTimingBudget(33000);
-  sensor3.startContinuous(33);
-
+  sensor3.setMeasurementTimingBudget(20000);
+  sensor3.startContinuous(20);
   Serial.println("All sensors initialized.");
     // Motor setup
   pinMode(PWMA, OUTPUT); pinMode(AIN1, OUTPUT); pinMode(AIN2, OUTPUT);
@@ -369,9 +408,11 @@ void setup() {
     //     delay(3000);
     // }
     delay(1000);
+    // moveDistance(25, 150);
 }
 
 void loop() {
+    Serial.printf("Bot at (%d, %d), orient: %d \n", posX, posY, orientation);
     identifyBlock();
     floodfill();
     int degrees = nextBlock();
@@ -380,7 +421,9 @@ void loop() {
         delay(1000);
     }
     rotate(degrees);
+    delay(500);
     moveForward();
+    delay(500);
 }
 
 void mspeed(int a, int b) {
