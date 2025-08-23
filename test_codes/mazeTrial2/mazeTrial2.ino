@@ -86,12 +86,6 @@ int dummymaze[MAZESIZE][MAZESIZE] = {
     14, 12, 6, 14, 14
 };
 
-
-// ---------------- ToF sensor setup ----------------
-const uint8_t sensorCount = 3;
-const uint8_t xshutPins[sensorCount] = { 13, 25, 27 }; // L, R, F
-VL53L1X sensors[sensorCount];
-
 // ---------------- PID variables ----------------
 float wallKp = 1.05;   // start small
 float wallKi = 0.001;  // start near zero
@@ -107,9 +101,9 @@ float wallPIDValue = 0;
 int distLeft, distRight, distFront;
 
 void updateSensors() {
-  distLeft  = sensors[0].read();
-  distRight = sensors[1].read();
-  distFront = sensors[2].read();
+  distLeft  = sensor1.read();
+  distRight = sensor2.read();
+  distFront = sensor3.read();
 }
 
 // ---------------- Both-Wall PID ----------------
