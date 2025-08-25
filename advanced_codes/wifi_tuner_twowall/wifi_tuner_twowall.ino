@@ -170,7 +170,7 @@ void setup() {
 
   Serial.println("Sensors initialized. Running Both-Wall PID only.");
 
-    WiFi.begin("MeOrYou", "12345678");
+    WiFi.begin("PRAYAS", "12345678");
   while (WiFi.status() != WL_CONNECTED) delay(500);
 
   Serial.printf("IP: %s\n", WiFi.localIP().toString().c_str());
