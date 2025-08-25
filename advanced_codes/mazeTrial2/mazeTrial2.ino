@@ -342,9 +342,7 @@ void rotate(int degree) {
     leftTicks = rightTicks = 0;
 
     mspeed(dir*baseSpeed, -dir*baseSpeed);
-    print("Rotating ", degree, " degrees, target ", target);
-    print("Writing speeds ", dir*baseSpeed, " ", -dir*baseSpeed);
-    while (rotatingLeft and rotatingRight) {
+    while (rotatingLeft or rotatingRight) {
         if (abs(leftTicks) > target) {
             mspeed(0, 300);
             rotatingLeft = false;
@@ -357,7 +355,6 @@ void rotate(int degree) {
         // delay(10);
     }
     mspeed(0, 0);
-
 }
 
 void setup() {
