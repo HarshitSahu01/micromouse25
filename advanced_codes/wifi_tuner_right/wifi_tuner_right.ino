@@ -35,7 +35,7 @@ float wallPrev  = 0;
 float wallInt   = 0;
 float wallPIDValue = 0;
 
-int baseSpeed = 150; // start slow for tuning
+int baseSpeed = 240; // start slow for tuning
 
 // ---------------- Distances ----------------
 int distLeft, distRight, distFront;

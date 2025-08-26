@@ -35,7 +35,7 @@ float wallPrev  = 0;
 float wallInt   = 0;
 float wallPIDValue = 0;
 
-int baseSpeed = 150; // start slow for tuning
+int baseSpeed = 240; // start slow for tuning
 
 // ---------------- Distances ----------------
 int distLeft, distRight, distFront;
@@ -170,7 +170,7 @@ void setup() {
 
   Serial.println("Sensors initialized. Running Both-Wall PID only.");
 
-    WiFi.begin("PRAYAS", "12345678");
+    WiFi.begin("MeOrYou", "12345678");
   while (WiFi.status() != WL_CONNECTED) delay(500);
 
   Serial.printf("IP: %s\n", WiFi.localIP().toString().c_str());

@@ -1,207 +1,204 @@
-# pip install scikit-optimize numpy
+"""
+tuner_ws_cli.py
+- Connects as WebSocket client to the ESP32 WS server (ws://esp32.local/ws)
+- Presents a REPL prompt "_> "
+- On `run`: sends next PID to ESP and `start` command (50 cm default)
+- Waits for streaming 'error' messages and final 'result' and then computes cost
+- Uses skopt.Optimizer (Bayesian) to ask/tell
+"""
 
-import time
+import asyncio
 import json
-import numpy as np
-from pathlib import Path
-from skopt import gp_minimize
+import math
+import time
+from skopt import Optimizer
 from skopt.space import Real
-from skopt.utils import use_named_args
-from skopt.callbacks import CheckpointSaver
+import numpy as np
+import websockets
+import sys
+import threading
 
-# -----------------------------
-# Config
-# -----------------------------
-RANDOM_SEED = 42
-RESULTS_DIR = Path("./bo_pid_results")
-RESULTS_DIR.mkdir(exist_ok=True)
-
-# Search space (note Ki log-scale)
-space = [
-    Real(0.1, 5.0,       name="Kp"),                   # linear
-    Real(1e-5, 1.0,      name="Ki", prior="log-uniform"),
-    Real(0.0, 3.0,       name="Kd"),                   # linear
-]
-
-# Weights for objective
-W_RMS = 1.0
-W_OVR = 5.0         # penalize overshoot beyond threshold
-W_STL = 0.5
-W_UNS = 1000.0      # large penalty for unsafe/unstable
-
-# Constraints/targets
-OVERSHOOT_ALLOW = 0.01   # 1% overshoot allowed 'for free'
-SETTLING_TOL_MM = 2.0    # +/- 2 mm band for "settled"
-
-# Replicates per candidate to reduce noise
-N_REP = 2
-
-# Early stopping
-MIN_IMPROVEMENT = 1e-3
-PATIENCE = 6
-
-
-# -----------------------------
-# Hooks you will implement later
-# -----------------------------
-def run_robot_trial(kp, ki, kd):
-    """
-    Run *one* physical trial on the robot with PID gains (kp, ki, kd).
-    Return a dict with performance metrics. This will be replaced later
-    with your WebSocket round-trip. For now, this is a STUB or SIM.
-
-    Return dict keys (all required):
-        {
-          "rms_error_mm": float,
-          "overshoot_frac": float,  # overshoot as fraction of target distance
-          "settling_time_s": float,
-          "unstable": bool,         # True if oscillation/timeout
-        }
-    """
-    # --- EXAMPLE: replace with real call ---
-    # Example "sim": penalize too high Kp or Kd; Ki small boost.
-    # This is just to make the code runnable; remove/replace later.
-    target = 180.0  # mm, one cell
-    np.random.seed()  # different noise per call
-    base_error = abs(1.2 - kp) + 0.2*abs(0.05 - np.log10(ki+1e-9)) + 0.6*abs(0.8 - kd)
-    rms_error_mm = max(0.5, 8.0 * base_error) + np.random.normal(0, 0.2)
-    overshoot_frac = max(0.0, 0.2 * (kp - 1.5)) + np.random.normal(0, 0.01)
-    settling_time_s = max(0.2, 1.0 + 0.6 * abs(kd - 0.8)) + np.random.normal(0, 0.05)
-    unstable = (kp > 4.5 or kd > 2.8 or overshoot_frac > 0.25)
-
-    return {
-        "rms_error_mm": float(max(0.0, rms_error_mm)),
-        "overshoot_frac": float(max(0.0, overshoot_frac)),
-        "settling_time_s": float(max(0.0, settling_time_s)),
-        "unstable": bool(unstable),
-    }
-
-
-# -----------------------------
-# Cost function (lower is better)
-# -----------------------------
-def compute_cost(metrics):
-    rms = metrics["rms_error_mm"]
-    ovr = metrics["overshoot_frac"]
-    stl = metrics["settling_time_s"]
-    uns = metrics["unstable"]
-
-    # Penalize overshoot only above allowed threshold
-    ovr_excess = max(0.0, ovr - OVERSHOOT_ALLOW)
-
-    J = (
-        W_RMS * (rms ** 2) +
-        W_OVR * (ovr_excess ** 2) +
-        W_STL * stl +
-        (W_UNS if uns else 0.0)
-    )
-    return float(J)
-
-
-# -----------------------------
-# Objective wrapper for skopt
-# -----------------------------
-best_so_far = {"J": float("inf"), "params": None, "metrics": None}
-no_improve_count = 0
-
-@use_named_args(space)
-def objective(**params):
-    global best_so_far, no_improve_count
-
-    kp, ki, kd = params["Kp"], params["Ki"], params["Kd"]
-
-    # Replicated runs for noise-robust estimate
-    Js, Ms = [], []
-    for _ in range(N_REP):
-        metrics = run_robot_trial(kp, ki, kd)
-        J = compute_cost(metrics)
-        Js.append(J)
-        Ms.append(metrics)
-
-        # Safety: if unstable, break early (don’t do more reps)
-        if metrics["unstable"]:
-            break
-
-    J_mean = float(np.mean(Js))
-    # Track best
-    if J_mean + MIN_IMPROVEMENT < best_so_far["J"]:
-        best_so_far = {
-            "J": J_mean,
-            "params": dict(params),
-            "metrics": Ms[int(np.argmin(Js))]
-        }
-        no_improve_count = 0
-    else:
-        no_improve_count += 1
-
-    print(f"[BO] Kp={kp:.4f} Ki={ki:.6f} Kd={kd:.4f}  ->  J={J_mean:.5f}  "
-          f"(best {best_so_far['J']:.5f})  unstable={Ms[-1]['unstable']}")
-    return J_mean
-
-
-# -----------------------------
-# Seeds (good initial guesses)
-# -----------------------------
-# Add your Ziegler–Nichols/manual seeds here
+# ---------- CONFIG ----------
+ESP_WS_URI = "ws://esp32.local/ws"   # <- change to ws://<IP>/ws if mDNS doesn't resolve
+TARGET_DISTANCE_CM = 50.0
+# initial_points provided by you
 initial_points = [
     (1.25, 0.001, 0.255),
     (0.7, 0.01, 0.4)
 ]
 
+space = [
+    Real(0.1, 5.0, name="Kp"),
+    Real(1e-5, 1.0, name="Ki", prior="log-uniform"),
+    Real(0.0, 3.0, name="Kd")
+]
 
-# -----------------------------
-# Run BO
-# -----------------------------
-def run_bayesopt(
-    n_calls=30,
-    n_initial_points=6,
-    acq_func="EI",     # EI or LCB or PI
-    xi=0.01,           # EI exploration (bigger -> more explore)
-    kappa=1.96,        # LCB param (ignored for EI)
-):
-    # Checkpointing
-    checkpoint = CheckpointSaver(str(RESULTS_DIR / "checkpoint.pkl"), compress=9)
+# cost weights (tune if you want different priorities)
+W_RMS = 1.0
+W_OVR = 5.0
+W_STL = 0.5
+W_UNS = 1000.0
 
-    # Combine explicit seeds with random initial points
-    x0 = initial_points
-    # y0 = [objective(Kp=kp, Ki=ki, Kd=kd) for (kp, ki, kd) in x0]
-    y0 = [objective([kp, ki, kd]) for (kp, ki, kd) in x0]
+# ---------- helper cost ----------
+def compute_cost(metrics):
+    rms = metrics.get("rms_error_mm", 0.0)
+    ovr = metrics.get("overshoot_frac", 0.0)
+    stl = metrics.get("settling_time_s", 0.0)
+    uns = metrics.get("unstable", False)
+    ovr_excess = max(0.0, ovr - 0.01)  # allow 1% overshoot free
+    J = W_RMS * (rms ** 2) + W_OVR * (ovr_excess ** 2) + W_STL * stl + (W_UNS if uns else 0.0)
+    return float(J)
 
-    res = gp_minimize(
-        func=objective,
-        dimensions=space,
-        n_calls=n_calls,
-        n_initial_points=n_initial_points,
-        x0=x0,
-        y0=y0,
-        acq_func=acq_func,
-        acq_optimizer="sampling",     # robust on rough landscapes
-        random_state=RANDOM_SEED,
-        noise="gaussian",
-        n_restarts_optimizer=5,
-        kappa=kappa,
-        xi=xi,
-        callback=[checkpoint],
-    )
+# ---------- main tuner class ----------
+class WebTuner:
+    def __init__(self, uri):
+        self.uri = uri
+        self.ws = None
+        self.loop = asyncio.get_event_loop()
+        self.optimizer = Optimizer(space, random_state=42, acq_func="EI", acq_optimizer="sampling")
+        # queue to receive final run results
+        self.result_q = asyncio.Queue()
+        # hold last received error messages for logging
+        self.last_errors = []
+        # keep list of runs
+        self.runs = []
+        self.best = None
+        # seed queue
+        self.seed_iter = iter(initial_points)
 
-    # Save best result
-    out = {
-        "best_J": best_so_far["J"],
-        "best_params": best_so_far["params"],
-        "best_metrics": best_so_far["metrics"],
-        "all_res": {
-            "x": res.x,
-            "fun": res.fun
-        }
-    }
-    (RESULTS_DIR / "best.json").write_text(json.dumps(out, indent=2))
-    print("\n=== BEST ===")
-    print(json.dumps(out, indent=2))
+    async def connect(self):
+        print(f"Connecting to {self.uri} ...")
+        self.ws = await websockets.connect(self.uri)
+        print("Connected websocket")
+        # spawn receiver
+        asyncio.ensure_future(self.receiver())
 
-    return out
+    async def receiver(self):
+        try:
+            async for msg in self.ws:
+                try:
+                    data = json.loads(msg)
+                except Exception as e:
+                    print("Bad JSON from ESP:", msg)
+                    continue
 
+                # handle types
+                if data.get("type") == "error":
+                    # streaming error sample
+                    t = data.get("time_ms", 0)
+                    err_ticks = data.get("error_ticks", 0)
+                    avg_ticks = data.get("avg_ticks", 0)
+                    self.last_errors.append((t, err_ticks, avg_ticks))
+                    print(f"[stream] t={t}ms err_ticks={err_ticks} avg_ticks={avg_ticks}")
+                elif data.get("type") == "result":
+                    print("[result] received final metrics")
+                    # push metrics onto result_q for the awaiting run
+                    await self.result_q.put(data)
+                else:
+                    # generic telemetry from notifyClients: print small summary
+                    if "debug" in data and data["debug"]:
+                        print("[esp debug] ", data["debug"])
+        except websockets.ConnectionClosed:
+            print("Websocket closed")
+        except Exception as e:
+            print("Receiver exception:", e)
+
+    async def send(self, payload: dict):
+        if self.ws is None:
+            raise RuntimeError("Websocket not connected")
+        msg = json.dumps(payload)
+        await self.ws.send(msg)
+
+    async def run_once(self, target_distance=TARGET_DISTANCE_CM):
+        """
+        Send next PID triple to ESP and start run, then wait for result.
+        """
+        # pick candidate: use seed first, then optimizer.ask()
+        try:
+            x0 = next(self.seed_iter)
+            candidate = list(x0)
+            print(f"[seed] using seed candidate {candidate}")
+        except StopIteration:
+            candidate = self.optimizer.ask().tolist()
+            print(f"[ask] optimizer suggested {candidate}")
+
+        Kp, Ki, Kd = candidate
+        # send PID update first
+        await self.send({"Kp": float(Kp), "Ki": float(Ki), "Kd": float(Kd)})
+        # small delay to ensure esp updates params
+        await asyncio.sleep(0.05)
+        # send start command
+        await self.send({"start": float(target_distance)})
+
+        # clear last errors
+        self.last_errors = []
+
+        # now wait for result object (blocks here until result arrives)
+        print("Waiting for trial result from ESP ...")
+        result = await self.result_q.get()  # will be the JSON final metrics
+        # compute cost
+        J = compute_cost(result)
+        print(f"Run finished: J={J:.5f} metrics={result}")
+        # feed into optimizer
+        # if candidate came from seed (x0), we still call tell
+        self.optimizer.tell(candidate, J)
+        # record run
+        self.runs.append({"x": candidate, "J": J, "metrics": result})
+        # update best
+        if self.best is None or J < self.best["J"]:
+            self.best = {"J": J, "x": candidate, "metrics": result}
+        return result
+
+    async def stop_run(self):
+        await self.send({"stop": True})
+
+    def print_best(self):
+        print("BEST SO FAR:")
+        if self.best:
+            print(f"  J={self.best['J']:.6f}  x={self.best['x']} metrics={self.best['metrics']}")
+        else:
+            print("  No runs yet.")
+
+# ------------------ CLI loop ------------------
+def run_cli(uri):
+    tuner = WebTuner(uri)
+
+    async def main_async():
+        await tuner.connect()
+        # REPL implemented by running blocking input in executor
+        loop = asyncio.get_event_loop()
+        print("\nType 'run' to execute next PID candidate, 'stop' to abort run, 'status' for best, 'exit' to quit.")
+        while True:
+            # blocking input in threadpool so event loop continues
+            cmd = await loop.run_in_executor(None, lambda: input("_> ").strip())
+            if cmd == "run":
+                # launch run_once and await
+                try:
+                    result = await tuner.run_once()
+                    print("Trial done. You may 'run' again.")
+                except Exception as e:
+                    print("Run failed:", e)
+            elif cmd == "stop":
+                try:
+                    await tuner.stop_run()
+                    print("Stop command sent.")
+                except Exception as e:
+                    print("Stop failed:", e)
+            elif cmd == "status":
+                tuner.print_best()
+            elif cmd in ("quit", "exit"):
+                print("Exiting...")
+                await tuner.ws.close()
+                return
+            elif cmd == "":
+                continue
+            else:
+                print("Unknown command. Use run / stop / status / exit.")
+
+    try:
+        asyncio.get_event_loop().run_until_complete(main_async())
+    except KeyboardInterrupt:
+        print("Interrupted, exiting.")
 
 if __name__ == "__main__":
-    t0 = time.time()
-    result = run_bayesopt(n_calls=28, n_initial_points=6, acq_func="EI", xi=0.02)
-    print(f"\nTime: {time.time()-t0:.1f}s")
+    run_cli(ESP_WS_URI)
