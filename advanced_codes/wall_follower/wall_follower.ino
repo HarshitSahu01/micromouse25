@@ -40,9 +40,11 @@ int distLeft = 0, distFront = 0, distRight = 0;
 
 const int baseSpeed = 240;
 const int targetDist = 80; // mm desired wall distance
-const int wallDetectThreshold = 120; // mm consider "wall present"
+const int frontThresh = 120; // mm consider "wall present"
+const int wallThresh = 120; // mm consider "wall present"
 const int outerSpeed = 220;
-const int innerSpeed = 120;
+const int innerSpeed = 80;
+const int rotationSpeed = 180;
 
 // ---------------- Wall PID ----------------
 float Kp = 1.45;
@@ -136,22 +138,22 @@ void behaviorStep() {
   updateSensors();
 
   // 1) If front obstacle, smooth arc depending on mode (Option B)
-  if (distFront < wallDetectThreshold) {
+  if (distFront < frontThresh) {
     if (followLeft) {
-      mspeed(outerSpeed, innerSpeed); // turn right
+      mspeed(rotationSpeed, -rotationSpeed); // turn right
     } else {
-      mspeed(innerSpeed, outerSpeed); // turn left
+      mspeed(-rotationSpeed, rotationSpeed); // turn left
     }
     return;
   }
   if (followLeft) {
-    if (distLeft > wallDetectThreshold) {
+    if (distLeft > wallThresh) {
       mspeed(innerSpeed, outerSpeed);
       return;
     }
     runWallPIDSingle(distLeft, targetDist, false);
   } else {
-    if (distRight > wallDetectThreshold) {
+    if (distRight > wallThresh) {
       mspeed(outerSpeed, innerSpeed);
       return;
     }
