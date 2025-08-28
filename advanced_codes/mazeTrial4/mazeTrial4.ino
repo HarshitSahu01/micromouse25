@@ -2,20 +2,9 @@
 #include <VL53L1X.h>
 #include <queue>
 #include <utility>
+#include "driver/pcnt.h"
+#include "wifilogger.h"
 using namespace std;
-
-// Utility function
-void print() {
-  Serial.println();  // Print a newline at the end of the line
-}
-
-// Variadic template function to handle multiple arguments
-template<typename T, typename... Args>
-void print(T first, Args... args) {
-  Serial.print(first);
-  Serial.print(" ");
-  print(args...);  // Recursive call to handle the next argument
-}
 
 #define BTN1 34
 #define BTN2 35
@@ -34,8 +23,10 @@ void print(T first, Args... args) {
 #define RIGHT_ENC_A 22
 #define RIGHT_ENC_B 23
 
-volatile long leftTicks = 0;
-volatile long rightTicks = 0;
+#define PCNT_LIM_VAL 30000
+
+int16_t leftTicks = 0;
+int16_t rightTicks = 0;
 
 // XSHUT pins
 #define XSHUT1 13
@@ -54,40 +45,15 @@ VL53L1X sensor3;
 
 int timingBudget = 20; // in ms
 
-void IRAM_ATTR leftEncoderISR() {
-  bool a = digitalRead(LEFT_ENC_A);
-  bool b = digitalRead(LEFT_ENC_B);
-  leftTicks += (a == b) ? 1 : -1;
-}
-
-void IRAM_ATTR rightEncoderISR() {
-  bool a = digitalRead(RIGHT_ENC_A);
-  bool b = digitalRead(RIGHT_ENC_B);
-  rightTicks += (a == b) ? 1 : -1;
-}
-
 int baseSpeed = 240;
 
 const int MAZESIZE = 5;
 int maze[MAZESIZE][MAZESIZE];
 int flood[MAZESIZE][MAZESIZE];
-int posX = 0, posY = 0; // Current position in the maze
+int posX = 0, posY = 0; 
 int orientation = 2; 
 
-// int ardmaze[MAZESIZE][MAZESIZE] = {
-//     0, 0, 0, 0, 0,
-//     0, 0, 0, 0, 0,
-//     0, 0, 0, 0, 0,
-//     0, 0, 0, 0, 0,
-//     0, 0, 0, 0, 0
-// };
-int dummymaze[MAZESIZE][MAZESIZE] = {
-    11, 13, 3, 9, 3,
-    8, 1, 0, 4, 6,
-    10, 10, 8, 5, 3,
-    10, 8, 0, 3, 10,
-    14, 12, 6, 14, 14
-};
+int dummymaze[MAZESIZE][MAZESIZE];
 
 // ---------------- PID variables ----------------
 float wallKp = 1.45;   // start small
@@ -98,6 +64,16 @@ float wallError = 0;
 float wallPrev  = 0;
 float wallInt   = 0;
 float wallPIDValue = 0;
+
+void resetEncoders() {
+  pcnt_counter_clear(PCNT_UNIT_0); // Left encoder
+  pcnt_counter_clear(PCNT_UNIT_1); // Right encoder
+}
+
+void readEncoders() {
+  pcnt_get_counter_value(PCNT_UNIT_0, &leftTicks);
+  pcnt_get_counter_value(PCNT_UNIT_1, &rightTicks);
+}
 
 
 // ---------------- Distances ----------------
@@ -179,17 +155,18 @@ void runEncoderPID() {
 }
 
 
-float cmToEncoderTicks = 9.5;
+float cmToEncoderTicks = 19;
 void moveForward() {
     int target = cmToEncoderTicks * 25; // 25 cm
-    leftTicks = rightTicks = 0;
-    int thresh = 130;
+    resetEncoders();
+    int thresh = 150;
     int mode = 0, newMode = 0;
     wallInt=0;
-    print("Moving forward 25 cm, target ", target);
+    Serial.printf("Moving forward 25 cm, target %d\n", target);
         // Serial.printf("Dbg: L: %d, R: %d, F: %d TL: %d, TR: %d\n", distLeft, distRight, distFront, leftTicks, rightTicks);
-    while (abs(leftTicks) < target and abs(rightTicks) < target) {
+    while (abs(leftTicks) < target or abs(rightTicks) < target) {
         updateSensors();
+        readEncoders();
         // Serial.printf("Dbg: L: %d, R: %d, F: %d TL: %d, TR: %d\n", distLeft, distRight, distFront, leftTicks, rightTicks);
         // runWallPID(distLeft, distRight);
         float isWallLeft = (distLeft < thresh);
@@ -199,70 +176,34 @@ void moveForward() {
         mode = newMode;
         if (isWallLeft and isWallRight) {
             runWallPID(distLeft, distRight);
-            Serial.println("Both walls");
+            // Serial.println("Both walls");
         } else if (isWallLeft) {
             runLeftWallPID(distLeft);
-            Serial.println("Left walls");
+            // Serial.println("Left walls");
         } else if (isWallRight) {
             runRightWallPID(distRight);
-            Serial.println("Right wall");
+            // Serial.println("Right wall");
         } else {
             runEncoderPID();
-            Serial.println("Encoder PID");
+            // Serial.println("Encoder PID");
         }
         delay(timingBudget);
     }
     mspeed(0, 0);
 }
 
-// void moveForward() {
-//     int target = cmToEncoderTicks * 25; // 25 cm
-//     leftTicks = rightTicks = 0;
-//     int thresh = 150;
-//     mspeed(baseSpeed, baseSpeed);
-//     print("Moving forward 25 cm, target ", target);
-//         Serial.printf("Dbg: L: %d, R: %d, F: %d TL: %d, TR: %d\n", distLeft, distRight, distFront, leftTicks, rightTicks);
-//     while (abs(leftTicks) < target and abs(rightTicks) < target) {
-//         updateSensors();
-//         Serial.printf("Dbg: L: %d, R: %d, F: %d TL: %d, TR: %d\n", distLeft, distRight, distFront, leftTicks, rightTicks);
-//         // runWallPID(distLeft, distRight);
-//         float isWallLeft = (distLeft < thresh);
-//         float isWallRight = (distRight < thresh);
-//         if (isWallLeft and isWallRight) {
-//             runWallPID(distLeft, distRight);
-//             Serial.println("Both walls");
-//         } else if (isWallLeft) {
-//             runLeftWallPID(distLeft);
-//             Serial.println("Left walls");
-//         } else if (isWallRight) {
-//             runRightWallPID(distRight);
-//             Serial.println("Right wall");
-//         } else {
-//             runEncoderPID();
-//             Serial.println("Encoder PID");
-//         }
-//         delay(20);
-//     }
-//     mspeed(0, 0);
-// }
-
 void identifyBlock() {
     uint8_t a[4], b[4];
-    int thresh = 150;
+    int thresh = 140;
     
-    a[0] = sensor2.read() < thresh;
-    a[1] = sensor3.read() < thresh;
-    a[3] = sensor1.read() < thresh;
+    a[0] = distFront < thresh;
+    a[1] = distRight < thresh;
+    a[3] = distLeft < thresh;
     a[2] = 0;
 
     for (int i = 0; i < 4; i++) {
         b[i] = a[(i - orientation+4) % 4];
     }
-
-    // b[0] = (dummymaze[posX][posY] & 1) == 1;
-    // b[1] = (dummymaze[posX][posY] & 2) == 2;
-    // b[2] = (dummymaze[posX][posY] & 4) == 4;
-    // b[3] = (dummymaze[posX][posY] & 8) == 8;
 
     int type = 8 * b[3] + 4 * b[2] + 2 * b[1] + b[0];
     maze[posX][posY] = type;
@@ -336,58 +277,146 @@ int nextBlock() {
     return rotationDirections[(orientation - oldOrient + 4) % 4];
 }
 
-float rotationKp = 2.0;
-float rotationKi = 0.0;
-float rotationKd = 0.5;
-float ticksPerDegree = 0.945;  
+// float ticksPerDegree = 0.945;  
+float ticksPerDegree = 2.43;
 
-void rotate(int degrees) {
-  leftTicks = rightTicks = 0;
-  long targetTicks = abs(degrees) * ticksPerDegree;
-  int dir = (degrees > 0) ? 1 : -1;  
+float Kp_turn = 2.0, Ki_turn = 0.0, Kd_turn = 0.5;
 
-  float integralR = 0;
-  float lastError = 0;
+void rotate(int degree) {
+    if (degree == 0) return;
 
+    resetEncoders(); 
+    
+    long targetTicks = abs(degree) * ticksPerDegree;
+    int dir = (degree > 0) ? 1 : -1;
 
-  while (true) {
-    // For rotation: left should go +target, right should go -target
-    long leftTarget  = targetTicks;
-    long rightTarget = targetTicks;
+    // --- LOGIC FIX 1: Flags to stop each motor independently ---
+    bool leftDone = false;
+    bool rightDone = false;
 
-    long leftError  = leftTarget  - abs(leftTicks);
-    long rightError = rightTarget - abs(rightTicks);
+    // PID state variables
+    float integralL = 0, integralR = 0;
+    float prevErrorL = 0, prevErrorR = 0;
+    
+    // The loop continues as long as AT LEAST ONE motor is not done.
+    while (!leftDone || !rightDone) {
+        readEncoders();
 
-    // Stop condition: both motors close enough
-    if (abs(leftError) < 5 && abs(rightError) < 5) break;
+        long errorL = targetTicks - abs(leftTicks);
+        long errorR = targetTicks - abs(rightTicks);
 
-    // PID for left motor
-    integralR += leftError;
-    float diffL = leftError - lastError;
-    float leftOutput = rotationKp * leftError + rotationKi * integralR + rotationKd * diffL;
+        // Check if motors have reached their target range
+        if (abs(errorL) < 5) leftDone = true;
+        if (abs(errorR) < 5) rightDone = true;
 
-    // PID for right motor
-    integralR += rightError;
-    float diffR = rightError - lastError;
-    float rightOutput = rotationKp * rightError + rotationKi * integralR + rotationKd * diffR;
+        int outputL = 0;
+        int outputR = 0;
 
-    lastError = (leftError + rightError) / 2;
+        // --- Left Motor PID ---
+        if (!leftDone) {
+            integralL += errorL;
+            integralL = constrain(integralL, -2000, 2000);
+            float derivL = errorL - prevErrorL;
+            prevErrorL = errorL;
+            outputL = Kp_turn * errorL + Ki_turn * integralL + Kd_turn * derivL;
+        }
 
-    // Clamp & add deadzone compensation
-    if (abs(leftOutput) < 80) leftOutput = (leftOutput >= 0 ? 80 : -80);
-    if (abs(rightOutput) < 80) rightOutput = (rightOutput >= 0 ? 80 : -80);
-    leftOutput  = constrain(leftOutput,  -255, 255);
-    rightOutput = constrain(rightOutput, -255, 255);
+        // --- Right Motor PID ---
+        if (!rightDone) {
+            integralR += errorR;
+            integralR = constrain(integralR, -2000, 2000);
+            float derivR = errorR - prevErrorR;
+            prevErrorR = errorR;
+            outputR = Kp_turn * errorR + Ki_turn * integralR + Kd_turn * derivR;
+        }
 
-    // Apply: left forward, right backward
-    mspeed(dir * leftOutput, -dir * rightOutput);
-    delay(20);
-  }
+        // --- LOGIC FIX 2: Reduce max speed when close to the target ---
+        int maxSpeedL = (abs(errorL) < 50) ? 80 : 255;
+        int maxSpeedR = (abs(errorR) < 50) ? 80 : 255;
+        
+        int minSpeed = 60; // Minimum speed to overcome inertia
 
-  mspeed(0, 0);
-  delay(500);
+        // Constrain motor outputs
+        if (outputL != 0) outputL = constrain(outputL, minSpeed, maxSpeedL);
+        if (outputR != 0) outputR = constrain(outputR, minSpeed, maxSpeedR);
+        
+        // Send a single motor command
+        mspeed(dir * outputL, -dir * outputR);
+
+        delay(10);
+    }
+
+    mspeed(0, 0); // Ensure motors are stopped
+    delay(100);   // Settle time
 }
 
+
+// void rotate(int degrees) {
+//   resetEncoders();
+//   long targetTicks = abs(degrees) * ticksPerDegree;
+//   int dir = (degrees > 0) ? 1 : -1;  
+
+//   float integralR = 0;
+//   float lastError = 0;
+
+
+//   while (true) {
+//     // For rotation: left should go +target, right should go -target
+//     long leftTarget  = targetTicks;
+//     long rightTarget = targetTicks;
+
+//     readEncoders();
+//     long leftError  = leftTarget  - abs(leftTicks);
+//     long rightError = rightTarget - abs(rightTicks);
+
+//     // Stop condition: both motors close enough
+//     if (abs(leftError) < 5 && abs(rightError) < 5) break;
+
+//     // PID for left motor
+//     integralR += leftError;
+//     float diffL = leftError - lastError;
+//     float leftOutput = rotationKp * leftError + rotationKi * integralR + rotationKd * diffL;
+
+//     // PID for right motor
+//     integralR += rightError;
+//     float diffR = rightError - lastError;
+//     float rightOutput = rotationKp * rightError + rotationKi * integralR + rotationKd * diffR;
+
+//     lastError = (leftError + rightError) / 2;
+
+//     // Clamp & add deadzone compensation
+//     if (abs(leftOutput) < 80) leftOutput = (leftOutput >= 0 ? 80 : -80);
+//     if (abs(rightOutput) < 80) rightOutput = (rightOutput >= 0 ? 80 : -80);
+//     leftOutput  = constrain(leftOutput,  -255, 255);
+//     rightOutput = constrain(rightOutput, -255, 255);
+
+//     // Apply: left forward, right backward
+//     mspeed(dir * leftOutput, -dir * rightOutput);
+//     delay(20);
+//   }
+
+//   mspeed(0, 0);
+//   delay(500);
+// }
+
+void setupPCNT(pcnt_unit_t unit, int pinA, int pinB) {
+  pcnt_config_t pcnt_config;
+  pcnt_config.pulse_gpio_num = pinA;
+  pcnt_config.ctrl_gpio_num = pinB;
+  pcnt_config.channel = PCNT_CHANNEL_0;
+  pcnt_config.unit = unit;
+  pcnt_config.pos_mode = PCNT_COUNT_INC;
+  pcnt_config.neg_mode = PCNT_COUNT_DEC;
+  pcnt_config.lctrl_mode = PCNT_MODE_REVERSE;
+  pcnt_config.hctrl_mode = PCNT_MODE_KEEP;
+  pcnt_config.counter_h_lim = PCNT_LIM_VAL;
+  pcnt_config.counter_l_lim = -PCNT_LIM_VAL;
+
+  pcnt_unit_config(&pcnt_config);
+  pcnt_counter_pause(unit);
+  pcnt_counter_clear(unit);
+  pcnt_counter_resume(unit);
+}
 
 void setup() {
     Serial.begin(115200);
@@ -448,14 +477,9 @@ void setup() {
   pinMode(PWMB, OUTPUT); pinMode(BIN1, OUTPUT); pinMode(BIN2, OUTPUT);
   pinMode(STBY, OUTPUT); digitalWrite(STBY, HIGH);
 
-  // Encoder setup
-  pinMode(LEFT_ENC_A, INPUT_PULLUP);
-  pinMode(LEFT_ENC_B, INPUT_PULLUP);
-  pinMode(RIGHT_ENC_A, INPUT_PULLUP);
-  pinMode(RIGHT_ENC_B, INPUT_PULLUP);
-
-  attachInterrupt(digitalPinToInterrupt(LEFT_ENC_A), leftEncoderISR, RISING);
-  attachInterrupt(digitalPinToInterrupt(RIGHT_ENC_A), rightEncoderISR, RISING);
+  
+  setupPCNT(PCNT_UNIT_0, LEFT_ENC_A, LEFT_ENC_B);
+  setupPCNT(PCNT_UNIT_1, RIGHT_ENC_A, RIGHT_ENC_B);
   Serial.println("Motor Encoders initialised");
 
   pinMode(BTN1, INPUT);
@@ -476,24 +500,68 @@ void setup() {
     delay(1000);
     rotate(0);
 
+    initWiFiLogger("MeOrYou", "12345678");
+    log("Logger working");
+    
+    rotate(45);
+
     Serial.println("Waiting for button press...");
     while (digitalRead(BTN1) == LOW) {}
     delay(1000);
 }
 
+void logMaze() {
+    String s = "Maze:\n";
+    for (int i = 0; i < MAZESIZE; i++) {
+        for (int j = 0; j < MAZESIZE; j++) {
+            s += String(maze[i][j]) + " ";
+        }
+        s += "\n";
+    }
+    log(s);
+
+    // s = "Flood:\n";
+    // for (int i = 0; i < MAZESIZE; i++) {
+    //     for (int j = 0; j < MAZESIZE; j++) {
+    //         s += String(flood[i][j]) + " ";
+    //     }
+    //     s += "\n";
+    // }
+    // log(s);
+}
+
+void logSensors() {
+    String s = "Sensors: L=" + String(distLeft) + " F=" + String(distFront) + " R=" + String(distRight);
+    log(s);
+}
+
 void loop() {
+    // delay(200);
+    // updateSensors();
+    // logSensors();
     // Serial.printf("Bot at (%d, %d), orient: %d \n", posX, posY, orientation);
+    log("Bot at (" + String(posX) + ", " + String(posY) + "), orient: " + String(orientation));
+    updateSensors();
+    logSensors();
     identifyBlock();
+    logMaze();
     floodfill();
     int degrees = nextBlock();
     while (degrees == -1) {
         Serial.println("End of the maze");
         delay(1000);
     }
+    // log("Rotating " + String(degrees) + " degrees");
     rotate(degrees);
-    delay(500);
+    // log("Rotation done");
+    delay(200);
+    // log("Moving forward");
     moveForward();
-    delay(500);
+    delay(200);
+
+    // updateSensors();
+    // Serial.printf("%d %d %d \n", distLeft, distFront, distRight);
+    // delay(200);
 }
 
 void mspeed(int a, int b) {

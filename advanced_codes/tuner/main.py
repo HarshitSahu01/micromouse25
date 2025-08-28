@@ -19,7 +19,7 @@ import sys
 import threading
 
 # ---------- CONFIG ----------
-ESP_WS_URI = "ws://esp32.local/ws"   # <- change to ws://<IP>/ws if mDNS doesn't resolve
+ESP_WS_URI = "ws://192.168.137.232/ws"   # <- change to ws://<IP>/ws if mDNS doesn't resolve
 TARGET_DISTANCE_CM = 50.0
 # initial_points provided by you
 initial_points = [

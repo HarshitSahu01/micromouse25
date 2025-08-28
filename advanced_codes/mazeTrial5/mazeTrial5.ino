@@ -90,9 +90,9 @@ int dummymaze[MAZESIZE][MAZESIZE] = {
 };
 
 // ---------------- PID variables ----------------
-float wallKp = 1.45;   // start small
-float wallKi = 0.0001;  // start near zero
-float wallKd = 0.93;   // start small
+float wallKp = 1.6;   // start small
+float wallKi = 0.0002;  // start near zero
+float wallKd = 0.65;   // start small
 
 float wallError = 0;
 float wallPrev  = 0;
@@ -215,37 +215,6 @@ void moveForward() {
     mspeed(0, 0);
 }
 
-// void moveForward() {
-//     int target = cmToEncoderTicks * 25; // 25 cm
-//     leftTicks = rightTicks = 0;
-//     int thresh = 150;
-//     mspeed(baseSpeed, baseSpeed);
-//     print("Moving forward 25 cm, target ", target);
-//         Serial.printf("Dbg: L: %d, R: %d, F: %d TL: %d, TR: %d\n", distLeft, distRight, distFront, leftTicks, rightTicks);
-//     while (abs(leftTicks) < target and abs(rightTicks) < target) {
-//         updateSensors();
-//         Serial.printf("Dbg: L: %d, R: %d, F: %d TL: %d, TR: %d\n", distLeft, distRight, distFront, leftTicks, rightTicks);
-//         // runWallPID(distLeft, distRight);
-//         float isWallLeft = (distLeft < thresh);
-//         float isWallRight = (distRight < thresh);
-//         if (isWallLeft and isWallRight) {
-//             runWallPID(distLeft, distRight);
-//             Serial.println("Both walls");
-//         } else if (isWallLeft) {
-//             runLeftWallPID(distLeft);
-//             Serial.println("Left walls");
-//         } else if (isWallRight) {
-//             runRightWallPID(distRight);
-//             Serial.println("Right wall");
-//         } else {
-//             runEncoderPID();
-//             Serial.println("Encoder PID");
-//         }
-//         delay(20);
-//     }
-//     mspeed(0, 0);
-// }
-
 void identifyBlock() {
     uint8_t a[4], b[4];
     int thresh = 150;
@@ -259,24 +228,19 @@ void identifyBlock() {
         b[i] = a[(i - orientation+4) % 4];
     }
 
-    // b[0] = (dummymaze[posX][posY] & 1) == 1;
-    // b[1] = (dummymaze[posX][posY] & 2) == 2;
-    // b[2] = (dummymaze[posX][posY] & 4) == 4;
-    // b[3] = (dummymaze[posX][posY] & 8) == 8;
-
     int type = 8 * b[3] + 4 * b[2] + 2 * b[1] + b[0];
     maze[posX][posY] = type;
     if (posX > 0) {
-        maze[posX-1][posY] |= (b[0] ? 4 : 0); // top wall
+        maze[posX-1][posY] |= (b[0] ? 4 : 0); // left wall
     }
     if (posX < MAZESIZE - 1) {
-        maze[posX+1][posY] |= (b[2] ? 1 : 0); // bottom wall
+        maze[posX+1][posY] |= (b[2] ? 1 : 0); // right wall
     }
     if (posY > 0) {
-        maze[posX][posY-1] |= (b[3] ? 2 : 0); // left wall
+        maze[posX][posY-1] |= (b[3] ? 2 : 0); // front wall
     }
     if (posY < MAZESIZE - 1) {
-        maze[posX][posY+1] |= (b[1] ? 8 : 0); // right wall
+        maze[posX][posY+1] |= (b[1] ? 8 : 0); // back wall
     }
     Serial.printf("(%d, %d) is of type %d\n", posX, posY, maze[posX][posY]);
 }
@@ -336,58 +300,28 @@ int nextBlock() {
     return rotationDirections[(orientation - oldOrient + 4) % 4];
 }
 
-float rotationKp = 2.0;
-float rotationKi = 0.0;
-float rotationKd = 0.5;
-float ticksPerDegree = 0.945;  
+float encoderCountToDegrees = 0.945;
+int dynSpeed = 80;
+void rotate(int degree) {
+    int target = encoderCountToDegrees * abs(degree);
+    int dir = degree > 0 ? 1 : -1;
+    bool rotatingLeft = true, rotatingRight = true;
+    leftTicks = rightTicks = 0;
 
-void rotate(int degrees) {
-  leftTicks = rightTicks = 0;
-  long targetTicks = abs(degrees) * ticksPerDegree;
-  int dir = (degrees > 0) ? 1 : -1;  
-
-  float integralR = 0;
-  float lastError = 0;
-
-
-  while (true) {
-    // For rotation: left should go +target, right should go -target
-    long leftTarget  = targetTicks;
-    long rightTarget = targetTicks;
-
-    long leftError  = leftTarget  - abs(leftTicks);
-    long rightError = rightTarget - abs(rightTicks);
-
-    // Stop condition: both motors close enough
-    if (abs(leftError) < 5 && abs(rightError) < 5) break;
-
-    // PID for left motor
-    integralR += leftError;
-    float diffL = leftError - lastError;
-    float leftOutput = rotationKp * leftError + rotationKi * integralR + rotationKd * diffL;
-
-    // PID for right motor
-    integralR += rightError;
-    float diffR = rightError - lastError;
-    float rightOutput = rotationKp * rightError + rotationKi * integralR + rotationKd * diffR;
-
-    lastError = (leftError + rightError) / 2;
-
-    // Clamp & add deadzone compensation
-    if (abs(leftOutput) < 80) leftOutput = (leftOutput >= 0 ? 80 : -80);
-    if (abs(rightOutput) < 80) rightOutput = (rightOutput >= 0 ? 80 : -80);
-    leftOutput  = constrain(leftOutput,  -255, 255);
-    rightOutput = constrain(rightOutput, -255, 255);
-
-    // Apply: left forward, right backward
-    mspeed(dir * leftOutput, -dir * rightOutput);
-    delay(20);
-  }
-
-  mspeed(0, 0);
-  delay(500);
+    mspeed(dir*baseSpeed, -dir*baseSpeed);
+    while (rotatingLeft or rotatingRight) {
+        if (abs(leftTicks) > target) {
+            mspeed(0, 300);
+            rotatingLeft = false;
+        }
+        if (abs(rightTicks) > target) {
+            mspeed(300, 0);
+            rotatingRight = false;
+        }
+        delay(5);
+    }
+    mspeed(0, 0);
 }
-
 
 void setup() {
     Serial.begin(115200);
@@ -473,16 +407,42 @@ void setup() {
     targetLeftDist /= epoch;
     targetRightDist /= epoch;
 
+    // rotate(90);
+    // delay(2000);
+    // rotate(-90);
+    // delay(2000);
+    // rotate(-180);
+//   mspeed(200, 200);
+    // for (int i = 0; i < 3; i++) {
+    //     moveForward();  
+    //     delay(3000);
+    // }
     delay(1000);
-    rotate(0);
+    rotate(45);
+    rotate(-45);
 
     Serial.println("Waiting for button press...");
     while (digitalRead(BTN1) == LOW) {}
     delay(1000);
+    // moveDistance(25, 150);
+    // Serial.printf("Reading from sensor 1 is %d\n", sensor1.read());
+    // Serial.printf("Reading from sensor 2 is %d\n", sensor2.read());
+    // Serial.printf("Reading from sensor 3 is %d\n", sensor3.read());
 }
 
 void loop() {
-    // Serial.printf("Bot at (%d, %d), orient: %d \n", posX, posY, orientation);
+    // moveForward();
+    // delay(2000);
+    // updateSensors();
+    // runLeftWallPID(distLeft);
+    // runRightWallPID(distRight);
+    // runEncoderPID();
+    // runWallPID(distLeft, distRight);
+    // delay(20);
+
+    Serial.printf("Sensor 1: %d \t Sensor 2: %d \t Sensor 3: %d\n", distLeft, distFront, distRight);
+    delay(200);
+    Serial.printf("Bot at (%d, %d), orient: %d \n", posX, posY, orientation);
     identifyBlock();
     floodfill();
     int degrees = nextBlock();
@@ -491,9 +451,9 @@ void loop() {
         delay(1000);
     }
     rotate(degrees);
-    delay(500);
+    delay(200);
     moveForward();
-    delay(500);
+    delay(200);
 }
 
 void mspeed(int a, int b) {

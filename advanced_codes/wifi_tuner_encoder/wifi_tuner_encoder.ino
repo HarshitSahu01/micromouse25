@@ -62,7 +62,7 @@ float wallError = 0, wallPrev = 0, wallInt = 0, wallPIDValue = 0;
 int baseSpeed = 150; // tuning start
 int timingBudget = 20; // ms loop delay
 
-float cmToEncoderTicks = 11.3; // your mapping (~ticks per cm)
+float cmToEncoderTicks = 11.4; // your mapping (~ticks per cm)
 
 // simple mspeed wrapper for Motor class (-255..255)
 void mspeed(int a, int b) {
