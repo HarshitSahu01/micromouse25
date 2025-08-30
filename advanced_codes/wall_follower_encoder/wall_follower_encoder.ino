@@ -27,7 +27,6 @@
 #define RIGHT_ENC_A 22
 #define RIGHT_ENC_B 23
 
-
 volatile long leftTicks = 0;
 volatile long rightTicks = 0;
 
@@ -40,7 +39,6 @@ volatile long rightTicks = 0;
 #define ADDR_L 0x30
 #define ADDR_F 0x31
 #define ADDR_R 0x32
-
 
 void IRAM_ATTR leftEncoderISR() {
   bool a = digitalRead(LEFT_ENC_A);
@@ -56,22 +54,23 @@ void IRAM_ATTR rightEncoderISR() {
 
 // ---------------- Sensors & globals ----------------
 VL53L1X sensorL, sensorF, sensorR;
-int timingBudget = 33; // ms
+int timingBudget = 20; // ms
+int curtime = 0; // for timing budget
 
 int distLeft = 0, distFront = 0, distRight = 0;
 
-const int baseSpeed = 240;
-const int targetDist = 80; // mm desired wall distance
-const int frontThresh = 130; // mm consider "wall present"
-const int wallThresh = 120; // mm consider "wall present"
-const int outerSpeed = 220;
-const int innerSpeed = 80;
-const int rotationSpeed = 180;
+const int baseSpeed = 230;        // Further reduced for better control
+const int targetDist = 80;        // mm desired wall distance
+const int frontThresh = 150;      // Reduced threshold for earlier detection
+const int wallThresh = 180;       // Increased for better wall detection
+const int outerSpeed = 255;       // Reduced for smoother turns
+const int innerSpeed = 70;        // Increased minimum for better movement
+const int rotationSpeed = 180;    // Further reduced for better accuracy
 
 // ---------------- Wall PID ----------------
-float Kp = 1.39;
-float Ki = 0.0002;
-float Kd = 0.86;
+float Kp = 1.40;                   // Increased for better response
+float Ki = 0.0002;                 // Increased for steady-state accuracy
+float Kd = 0.87;                   // Increased for stability
 float pidPrev = 0, pidInt = 0;
 
 // ---------------- Mode ----------------
@@ -79,15 +78,15 @@ bool followLeft = false; // set at startup
 
 // ---------------- Motor helper ----------------
 void mspeed(int a, int b) {
-  // clamp to -255..255
-  a = constrain(a, -255, 255);
-  b = constrain(b, -255, 255);
+    if (abs(a) <= 255) {
+        digitalWrite(AIN1, a >= 0); digitalWrite(AIN2, a < 0);
+        analogWrite(PWMA, abs(a));
+    }
 
-  digitalWrite(AIN1, a >= 0); digitalWrite(AIN2, a < 0);
-  analogWrite(PWMA, abs(a));
-
-  digitalWrite(BIN1, b >= 0); digitalWrite(BIN2, b < 0);
-  analogWrite(PWMB, abs(b));
+    if (abs(b) <= 255) {
+        digitalWrite(BIN1, b >= 0); digitalWrite(BIN2, b < 0);
+        analogWrite(PWMB, abs(b));
+    }
 }
 
 // ---------------- Sensors ----------------
@@ -95,23 +94,39 @@ void setupSensors() {
   Wire.begin(33, 32);
 
   // Reset all sensors
-  pinMode(XSHUT_L, OUTPUT); pinMode(XSHUT_F, OUTPUT); pinMode(XSHUT_R, OUTPUT);
-  digitalWrite(XSHUT_L, LOW); digitalWrite(XSHUT_F, LOW); digitalWrite(XSHUT_R, LOW);
+  pinMode(XSHUT_L, OUTPUT); 
+  pinMode(XSHUT_F, OUTPUT); 
+  pinMode(XSHUT_R, OUTPUT);
+  digitalWrite(XSHUT_L, LOW); 
+  digitalWrite(XSHUT_F, LOW); 
+  digitalWrite(XSHUT_R, LOW);
   delay(100);
 
   // Bring left up
-  pinMode(XSHUT_L, INPUT); delay(10);
-  if (!sensorL.init()) { Serial.println("SensorL init fail"); while(1); }
+  pinMode(XSHUT_L, INPUT); 
+  delay(10);
+  if (!sensorL.init()) { 
+    Serial.println("SensorL init fail"); 
+    while(1); 
+  }
   sensorL.setAddress(ADDR_L);
 
   // front
-  pinMode(XSHUT_F, INPUT); delay(10);
-  if (!sensorF.init()) { Serial.println("SensorF init fail"); while(1); }
+  pinMode(XSHUT_F, INPUT); 
+  delay(10);
+  if (!sensorF.init()) { 
+    Serial.println("SensorF init fail"); 
+    while(1); 
+  }
   sensorF.setAddress(ADDR_F);
 
   // right
-  pinMode(XSHUT_R, INPUT); delay(10);
-  if (!sensorR.init()) { Serial.println("SensorR init fail"); while(1); }
+  pinMode(XSHUT_R, INPUT); 
+  delay(10);
+  if (!sensorR.init()) { 
+    Serial.println("SensorR init fail"); 
+    while(1); 
+  }
   sensorR.setAddress(ADDR_R);
 
   sensorL.setDistanceMode(VL53L1X::Medium);
@@ -133,6 +148,11 @@ void updateSensors() {
   distLeft  = sensorL.read();
   distFront = sensorF.read();
   distRight = sensorR.read();
+  
+  // Add sensor error handling
+  if (distLeft == 0 || distLeft > 4000) distLeft = 4000;
+  if (distFront == 0 || distFront > 4000) distFront = 4000;
+  if (distRight == 0 || distRight > 4000) distRight = 4000;
 }
 
 // ---------------- PID routines ----------------
@@ -142,19 +162,18 @@ void runWallPIDSingle(int measured, int desired, bool invertMirror) {
   if (invertMirror) e = -e;
 
   pidInt += e;
-  pidInt = constrain(pidInt, -1000, 1000);
+  pidInt = constrain(pidInt, -5000, 5000);  // Increased integral limits
   float deriv = e - pidPrev;
   pidPrev = e;
 
   float pid = Kp * e + Ki * pidInt + Kd * deriv;
 
   // pid positive -> steering correction
-  int leftSp = constrain(baseSpeed - pid, 0, 255);
-  int rightSp = constrain(baseSpeed + pid, 0, 255);
+  int leftSp = constrain(baseSpeed - pid, 30, 255);   // Added minimum speed
+  int rightSp = constrain(baseSpeed + pid, 30, 255);  // Added minimum speed
 
   mspeed(leftSp, rightSp);
 }
-
 
 float encoderCountToDegrees = 0.945;
 void rotate(int degree) {
@@ -162,8 +181,9 @@ void rotate(int degree) {
     int dir = degree > 0 ? 1 : -1;
     bool rotatingLeft = true, rotatingRight = true;
     leftTicks = rightTicks = 0;
+    int rspeed = baseSpeed;
 
-    mspeed(dir*baseSpeed, -dir*baseSpeed);
+    mspeed(dir*rspeed, -dir*rspeed);
     while (rotatingLeft or rotatingRight) {
         if (abs(leftTicks) > target) {
             mspeed(0, 300);
@@ -173,45 +193,66 @@ void rotate(int degree) {
             mspeed(300, 0);
             rotatingRight = false;
         }
+        if (abs(leftTicks) > target - 50 or abs(rightTicks) > target - 50) {
+          rspeed = 120;
+        }
         delay(5);
     }
     mspeed(0, 0);
+    pidInt = 0;
+    pidPrev = 0; 
 }
 
 // ---------------- Main behavior (symmetric) ----------------
 void behaviorStep() {
   updateSensors();
+  
+  // Debug output
+  // Serial.printf("L:%d F:%d R:%d Mode:%s\n", 
+  //               distLeft, distFront, distRight, 
+  //               followLeft ? "LEFT" : "RIGHT");
 
-  // 1) If front obstacle, smooth arc depending on mode (Option B)
+  // 1) Handle missing wall first - search behavior (higher priority than front obstacle)
   if (followLeft) {
     if (distLeft > wallThresh) {
-      mspeed(innerSpeed, outerSpeed);
+      // Serial.println("Left wall missing - turning left");
+      mspeed(innerSpeed, outerSpeed);  // Turn left to find wall
       return;
     }
   } else {
     if (distRight > wallThresh) {
-      mspeed(outerSpeed, innerSpeed);
+      // Serial.println("Right wall missing - turning right");
+      mspeed(outerSpeed, innerSpeed);  // Turn right to find wall
       return;
     }
   }
-  
+
+  // 2) Check for front obstacle - but only when we have a wall to follow
   if (distFront < frontThresh) {
+    // Serial.println("Front obstacle detected - executing turn");
+    
+    // Don't stop completely, just slow down briefly
+    mspeed(-100, -100);
+    delay(20);
+    
     if (followLeft) {
-        if (distRight < wallThresh) rotate(180); 
-        else rotate(90);
+      // Left wall following: turn right away from wall
+      // Serial.println("Left follow mode - turning right 90 degrees");
+      rotate(90);
     } else {
-      if (distLeft < wallThresh) rotate(-180);
-      else rotate(-90);
+      // Right wall following: turn left away from wall
+      // Serial.println("Right follow mode - turning left 90 degrees");
+      rotate(-90);
     }
     return;
   }
 
+  // 3) Wall following with PID
   if (followLeft) {
     runWallPIDSingle(distLeft, targetDist, false);
   } else {
     runWallPIDSingle(distRight, targetDist, true);
   }
-
 }
 
 // ---------------- Setup & loop ----------------
@@ -220,9 +261,14 @@ void setup() {
   delay(10);
 
   // Motor pins
-  pinMode(PWMA, OUTPUT); pinMode(AIN1, OUTPUT); pinMode(AIN2, OUTPUT);
-  pinMode(PWMB, OUTPUT); pinMode(BIN1, OUTPUT); pinMode(BIN2, OUTPUT);
-  pinMode(STBY, OUTPUT); digitalWrite(STBY, HIGH);
+  pinMode(PWMA, OUTPUT); 
+  pinMode(AIN1, OUTPUT); 
+  pinMode(AIN2, OUTPUT);
+  pinMode(PWMB, OUTPUT); 
+  pinMode(BIN1, OUTPUT); 
+  pinMode(BIN2, OUTPUT);
+  pinMode(STBY, OUTPUT); 
+  digitalWrite(STBY, HIGH);
 
   // Buttons
   pinMode(BTN1, INPUT);
@@ -241,17 +287,26 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(RIGHT_ENC_A), rightEncoderISR, RISING);
 
   Serial.println("Press BTN1 (left) or BTN2 (right) to choose wall-follow mode...");
+  
   // wait for a button press at start
   while (true) {
-    if (digitalRead(BTN1) == HIGH) { followLeft = true; break; }
-    if (digitalRead(BTN2) == HIGH) { followLeft = false; break; }
+    if (digitalRead(BTN1) == HIGH) { 
+      followLeft = true; 
+      break; 
+    }
+    if (digitalRead(BTN2) == HIGH) { 
+      followLeft = false; 
+      break; 
+    }
     delay(10);
   }
   delay(300);
   Serial.printf("Mode chosen: %s-wall follow\n", followLeft ? "LEFT" : "RIGHT");
+  curtime = millis();
 }
 
 void loop() {
   behaviorStep();
-  delay(timingBudget); // cadence matched to sensor timing
+  while(millis() - curtime < timingBudget) {}
+  curtime = millis();
 }

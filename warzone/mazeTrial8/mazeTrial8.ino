@@ -46,7 +46,6 @@ VL53L1X sensor1;
 VL53L1X sensor2;
 VL53L1X sensor3;
 
-int timingBudget = 20; // in ms
 
 void IRAM_ATTR leftEncoderISR() {
   bool a = digitalRead(LEFT_ENC_A);
@@ -60,7 +59,9 @@ void IRAM_ATTR rightEncoderISR() {
   rightTicks += (a == b) ? 1 : -1;
 }
 
+int timingBudget = 20; // in ms
 int baseSpeed = 240;
+int frontThresh = 40;
 
 const int MAZESIZE = 5;
 int maze[MAZESIZE][MAZESIZE];
@@ -68,11 +69,18 @@ int flood[MAZESIZE][MAZESIZE];
 int posX = 0, posY = 0; // Current position in the maze
 int orientation = 2;
 
+int dummymaze[MAZESIZE][MAZESIZE] = {
+    13, 5, 5, 1, 7,
+    9, 5, 5, 6, 11,
+    12, 3, 9, 1, 6,
+    9, 6, 10, 10, 11,
+    12, 5, 6, 12, 6
+}; 
 
 // ---------------- PID variables ----------------
-float wallKp = 1.6;   // start small
-float wallKi = 0.0002;  // start near zero
-float wallKd = 0.65;   // start small
+float wallKp = 1.2;   // start small
+float wallKi = 0.0001;  // start near zero
+float wallKd = 10.2;   // start small
 
 
 // ---------------- Distances ----------------
@@ -160,7 +168,7 @@ float cmToEncoderTicks = 9.6;
 void moveForward() {
     int target = cmToEncoderTicks * 25; // 25 cm
     leftTicks = rightTicks = 0;
-   int error = 10;
+   int error = 20;
 
     // Reset all PID states before starting a new movement.
     bothWallState = {};
@@ -169,7 +177,7 @@ void moveForward() {
     encoderState = {};
 
     // 💡 IMPROVEMENT 3: Loop until the AVERAGE distance is met.
-    while ((abs(leftTicks) + abs(rightTicks)) / 2 < target) {
+    while (((abs(leftTicks) + abs(rightTicks)) / 2 < target) and distFront > frontThresh) {
         updateSensors();
 
         bool isWallLeft = (distLeft < targetLeftDist + error);
@@ -193,14 +201,20 @@ void identifyBlock() {
     uint8_t a[4], b[4];
     int thresh = 150;
    
-    a[0] = sensor2.read() < thresh;
-    a[1] = sensor3.read() < thresh;
-    a[3] = sensor1.read() < thresh;
-    a[2] = 0;
+    // a[0] = sensor2.read() < thresh;
+    // a[1] = sensor3.read() < thresh;
+    // a[3] = sensor1.read() < thresh;
+    // a[2] = 0;
 
-    for (int i = 0; i < 4; i++) {
-        b[i] = a[(i - orientation+4) % 4];
-    }
+    // for (int i = 0; i < 4; i++) {
+    //     b[i] = a[(i - orientation+4) % 4];
+    // }
+
+    
+    b[0] = (dummymaze[posX][posY] & 1) == 1;
+    b[1] = (dummymaze[posX][posY] & 2) == 2;
+    b[2] = (dummymaze[posX][posY] & 4) == 4;
+    b[3] = (dummymaze[posX][posY] & 8) == 8;
 
     int type = 8 * b[3] + 4 * b[2] + 2 * b[1] + b[0];
     maze[posX][posY] = type;
@@ -387,7 +401,9 @@ void setup() {
 
     Serial.println("Waiting for button press...");
     while (digitalRead(BTN1) == LOW) {}
-    delay(1000);
+    delay(900);
+    updateSensors();
+    delay(100);
 }
 
 void loop() {
@@ -400,11 +416,25 @@ void loop() {
     // runWallPID(distLeft, distRight);
     // delay(20);
 
-    Serial.printf("Sensor 1: %d \t Sensor 2: %d \t Sensor 3: %d\n", distLeft, distFront, distRight);
-    delay(200);
-    Serial.printf("Bot at (%d, %d), orient: %d \n", posX, posY, orientation);
+    // Serial.printf("Sensor 1: %d \t Sensor 2: %d \t Sensor 3: %d\n", distLeft, distFront, distRight);
+    // delay(200);
+    // Serial.printf("Bot at (%d, %d), orient: %d \n", posX, posY, orientation);
     identifyBlock();
     floodfill();
+    
+    for (int i = 0; i < MAZESIZE; i++) {
+        for (int j = 0; j < MAZESIZE; j++) {
+            Serial.printf("%d ", maze[i][j]);
+        }
+        Serial.println();
+    }
+    Serial.println();
+    for (int i = 0; i < MAZESIZE; i++) {
+        for (int j = 0; j < MAZESIZE; j++) {
+            Serial.printf("%d ", flood[i][j]);
+        }
+        Serial.println();
+    }
     int degrees = nextBlock();
     while (degrees == -1) {
         Serial.println("End of the maze");
