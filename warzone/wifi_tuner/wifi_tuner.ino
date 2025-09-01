@@ -1,7 +1,9 @@
 #include <Wire.h>
 #include <VL53L1X.h>
-#include <queue>
-#include <utility>
+#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
+#include <ArduinoJson.h>
+#include <ESPmDNS.h>
 using namespace std;
 
 #define BTN1 34
@@ -75,9 +77,9 @@ int orientation = 2;
 
 
 // ---------------- PID variables ----------------
-float wallKp = 1.45;   // start small
+float wallKp = 1.2;   // start small
 float wallKi = 0.0002;  // start near zero
-float wallKd = 8.2;   // start small
+float wallKd = 10.2;   // start small
 
 
 // ---------------- Distances ----------------
@@ -196,92 +198,6 @@ void moveForward() {
     delay(2);
     mspeed(0, 0);
 }
-
-void identifyBlock() {
-    uint8_t a[4], b[4];
-    int thresh = 150;
-   
-    a[0] = sensor2.read() < thresh;
-    a[1] = sensor3.read() < thresh;
-    a[3] = sensor1.read() < thresh;
-    a[2] = 0;
-
-    for (int i = 0; i < 4; i++) {
-        b[i] = a[(i - orientation+4) % 4];
-    }
-
-    int type = 8 * b[3] + 4 * b[2] + 2 * b[1] + b[0];
-    maze[posX][posY] = type;
-    if (posX > 0) {
-        maze[posX-1][posY] |= (b[0] ? 4 : 0); // left wall
-    }
-    if (posX < MAZESIZE - 1) {
-        maze[posX+1][posY] |= (b[2] ? 1 : 0); // right wall
-    }
-    if (posY > 0) {
-        maze[posX][posY-1] |= (b[3] ? 2 : 0); // front wall
-    }
-    if (posY < MAZESIZE - 1) {
-        maze[posX][posY+1] |= (b[1] ? 8 : 0); // back wall
-    }
-    Serial.printf("(%d, %d) is of type %d\n", posX, posY, maze[posX][posY]);
-}
-
-void floodfill() {
-    int targetX = MAZESIZE - 1, targetY = MAZESIZE - 1;
-    memset(flood, -1, MAZESIZE* MAZESIZE * sizeof(int));
-    flood[targetX][targetY] = 0;
-
-    queue<pair<int, int>> q;
-    q.push({targetX, targetY});
-
-    while (not q.empty()) {
-        auto [x, y] = q.front();
-        q.pop();
-        if (x > 0 and flood[x-1][y] == -1 and (maze[x][y]&1) != 1) {
-            flood[x-1][y] = flood[x][y] + 1;
-            q.push({x-1, y});
-        }
-        if (x < MAZESIZE - 1 and flood[x+1][y] == -1 and (maze[x][y]&4) != 4) {
-            flood[x+1][y] = flood[x][y] + 1;
-            q.push({x+1, y});
-        }
-        if (y > 0 and flood[x][y-1] == -1 and (maze[x][y]&8) != 8) {
-            flood[x][y-1] = flood[x][y] + 1;
-            q.push({x, y-1});
-        }
-        if (y < MAZESIZE - 1 and flood[x][y+1] == -1 and (maze[x][y]&2) != 2) {
-            flood[x][y+1] = flood[x][y] + 1;
-            q.push({x, y+1});
-        }
-    }
-}
-
-int rotationDirections[4] = { 0, 90, 180, -90 }; // 0: forward, 1: right, 2: backward, 3: left
-int nextBlock() {
-    int target = -1;
-    int oldOrient = orientation;
-    if (posX > 0 and flood[posX-1][posY] == flood[posX][posY] - 1 and (maze[posX][posY]&1) != 1) {
-        target = 0;
-        posX -= 1; // Move left
-        orientation = 0;
-    } else if (posX < MAZESIZE - 1 and flood[posX+1][posY] == flood[posX][posY] - 1 and (maze[posX][posY]&4) != 4) {
-        target = 2;
-        posX += 1; // Move right
-        orientation = 2;
-    } else if (posY > 0 and flood[posX][posY-1] == flood[posX][posY] - 1 and (maze[posX][posY]&8) != 8) {
-        target = 3;
-        posY -= 1; // Move forward
-        orientation = 3;
-    } else if (posY < MAZESIZE - 1 and flood[posX][posY+1] == flood[posX][posY] - 1 and (maze[posX][posY]&2) != 2) {
-        target = 1;
-        posY += 1; // Move backward
-        orientation = 1;
-    }
-    if (target == -1) return -1;
-    return rotationDirections[(orientation - oldOrient + 4) % 4];
-}
-
 // float encoderCountToDegrees = 0.945;
 float encoderCountToDegrees = 0.945;
 int dynSpeed = 80;
@@ -306,6 +222,72 @@ void rotate(int degree) {
     mspeed(dir*50, -dir*50);
     delay(2);
     mspeed(0, 0);
+}
+
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+
+
+bool clientConnected = false;
+bool running = false;
+float targetDistance = 0.0;
+
+String debugMsg = "";
+
+// === WEBSOCKET HANDLER ===
+void notifyClients() {
+  StaticJsonDocument<256> doc;
+  doc["conn"] = clientConnected;
+  doc["running"] = running;
+  doc["distance"] = targetDistance;
+  doc["Kp"] = Kp;
+  doc["Ki"] = Ki;
+  doc["Kd"] = Kd;
+  doc["debug"] = debugMsg;
+
+  String out;
+  serializeJson(doc, out);
+  ws.textAll(out);
+
+  // Serial debug
+  if(debugMsg.length() > 0){
+    Serial.print(debugMsg);
+  }
+  debugMsg = "";
+}
+
+void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
+               AwsEventType type, void *arg, uint8_t *data, size_t len) {
+  if (type == WS_EVT_CONNECT) {
+    clientConnected = true;
+    debugMsg += "Client Connected\n";
+    Serial.println("Client Connected");
+  } else if (type == WS_EVT_DISCONNECT) {
+    clientConnected = false;
+    debugMsg += "Client Disconnected\n";
+    Serial.println("Client Disconnected");
+  } else if (type == WS_EVT_DATA) {
+    String msg; msg.reserve(len+1);
+    for (size_t i = 0; i < len; i++) msg += (char)data[i];
+
+    StaticJsonDocument<256> jd;
+    if (!deserializeJson(jd, msg)) {
+      if (jd.containsKey("start")) {
+        targetDistance = jd["start"].as<float>();
+        running = true;
+        debugMsg += "Started → targetDistance: " + String(targetDistance) + "\n";
+        Serial.println("Received START command, distance: " + String(targetDistance));
+      }
+      if (jd.containsKey("stop")) {
+        running = false;
+        debugMsg += "Stopped\n";
+        Serial.println("Received STOP command");
+      }
+      if (jd.containsKey("Kp")) { wallKp = jd["Kp"].as<float>(); debugMsg += "Kp = " + String(wallKp) + "\n"; Serial.println("Updated Kp: " + String(wallKp)); }
+      if (jd.containsKey("Ki")) { wallKi = jd["Ki"].as<float>(); debugMsg += "Ki = " + String(wallKi) + "\n"; Serial.println("Updated Ki: " + String(wallKi)); }
+      if (jd.containsKey("Kd")) { wallKd = jd["Kd"].as<float>(); debugMsg += "Kd = " + String(wallKd) + "\n"; Serial.println("Updated Kd: " + String(wallKd)); }
+    }
+  }
 }
 
 void setup() {
@@ -399,11 +381,23 @@ void setup() {
     rotate(45);
     rotate(-45);
 
-
+    
     Serial.println("Waiting for button press...");
     while (digitalRead(BTN1) == LOW) {delay(5);}
     Serial.println("Starting");
     delay(1000);
+
+    Serial.println("Sensors initialized. Running Both-Wall PID only.");
+
+    WiFi.begin("MeOrYou", "12345678");
+  while (WiFi.status() != WL_CONNECTED) delay(500);
+
+  Serial.printf("IP: %s\n", WiFi.localIP().toString().c_str());
+  if (!MDNS.begin("esp32")) Serial.println("mDNS init failed");
+
+  ws.onEvent(onWsEvent);
+  server.addHandler(&ws);
+  server.begin();
 
 }
 
@@ -412,23 +406,8 @@ void loop() {
     // Serial.printf("Sensor 1: %d \t Sensor 2: %d \t Sensor 3: %d\n", distLeft, distFront, distRight);
     // delay(200);
     // Serial.printf("Bot at (%d, %d), orient: %d \n", posX, posY, orientation);
-    identifyBlock();
-    floodfill();
-    for (int i = 0; i < MAZESIZE; i++) {
-        for (int j = 0; j < MAZESIZE; j++) {
-            Serial.printf("%d ", maze[i][j]);
-        }
-        Serial.println();
-    }
-    int degrees = nextBlock();
-    while (degrees == -1) {
-        Serial.println("End of the maze");
-        delay(1000);
-    }
-    rotate(degrees);
-    delay(200);
     moveForward();
-    delay(200);
+    delay(10);
 }
 
 void mspeed(int a, int b) {

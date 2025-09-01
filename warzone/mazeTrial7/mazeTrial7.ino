@@ -7,9 +7,6 @@ using namespace std;
 #define BTN1 34
 #define BTN2 35
 
-#define LED1 0
-#define LED2 12
-
 #define AIN1 17
 #define AIN2 16
 #define PWMA 4
@@ -49,6 +46,7 @@ VL53L1X sensor1;
 VL53L1X sensor2;
 VL53L1X sensor3;
 
+int timingBudget = 20; // in ms
 
 void IRAM_ATTR leftEncoderISR() {
   bool a = digitalRead(LEFT_ENC_A);
@@ -62,10 +60,7 @@ void IRAM_ATTR rightEncoderISR() {
   rightTicks += (a == b) ? 1 : -1;
 }
 
-int timingBudget = 20; // in mm
-int frontThresh = 60;
 int baseSpeed = 240;
-int rotSpeed = 150;
 
 const int MAZESIZE = 8;
 int maze[MAZESIZE][MAZESIZE];
@@ -75,9 +70,9 @@ int orientation = 2;
 
 
 // ---------------- PID variables ----------------
-float wallKp = 1.45;   // start small
+float wallKp = 1.6;   // start small
 float wallKi = 0.0002;  // start near zero
-float wallKd = 8.2;   // start small
+float wallKd = 0.65;   // start small
 
 
 // ---------------- Distances ----------------
@@ -161,7 +156,7 @@ void runEncoderPID(PIDControllerState& state) {
 
 
 // --- Main forward movement logic ---
-float cmToEncoderTicks = 10.3;
+float cmToEncoderTicks = 9.6;
 void moveForward() {
     int target = cmToEncoderTicks * 25; // 25 cm
     leftTicks = rightTicks = 0;
@@ -176,7 +171,6 @@ void moveForward() {
     // 💡 IMPROVEMENT 3: Loop until the AVERAGE distance is met.
     while ((abs(leftTicks) + abs(rightTicks)) / 2 < target) {
         updateSensors();
-        if (distFront < frontThresh) break;
 
         bool isWallLeft = (distLeft < targetLeftDist + error);
         bool isWallRight = (distRight < targetRightDist + error);
@@ -192,8 +186,6 @@ void moveForward() {
         }
         delay(20); // A small delay is good for PID stability
     }
-    mspeed(-50, -50);
-    delay(2);
     mspeed(0, 0);
 }
 
@@ -282,7 +274,6 @@ int nextBlock() {
     return rotationDirections[(orientation - oldOrient + 4) % 4];
 }
 
-// float encoderCountToDegrees = 0.945;
 float encoderCountToDegrees = 0.945;
 int dynSpeed = 80;
 void rotate(int degree) {
@@ -291,7 +282,7 @@ void rotate(int degree) {
     bool rotatingLeft = true, rotatingRight = true;
     leftTicks = rightTicks = 0;
 
-    mspeed(dir*rotSpeed, -dir*rotSpeed);
+    mspeed(dir*baseSpeed, -dir*baseSpeed);
     while (rotatingLeft or rotatingRight) {
         if (abs(leftTicks) > target) {
             mspeed(0, 300);
@@ -303,8 +294,6 @@ void rotate(int degree) {
         }
         delay(5);
     }
-    mspeed(dir*50, -dir*50);
-    delay(2);
     mspeed(0, 0);
 }
 
@@ -380,9 +369,6 @@ void setup() {
   pinMode(BTN1, INPUT);
   pinMode(BTN2, INPUT);
 
-  pinMode(LED1, OUTPUT);
-  pinMode(LED2, OUTPUT);
-
     // calibrate sensors at the start by taking 10 readings
     int epoch=10;
     targetLeftDist = targetRightDist = 0;
@@ -399,19 +385,24 @@ void setup() {
     rotate(45);
     rotate(-45);
 
-
     Serial.println("Waiting for button press...");
-    while (digitalRead(BTN1) == LOW) {delay(5);}
-    Serial.println("Starting");
+    while (digitalRead(BTN1) == LOW) {}
     delay(1000);
-
 }
 
 void loop() {
+    // moveForward();
+    // delay(2000);
+    // updateSensors();
+    // runLeftWallPID(distLeft);
+    // runRightWallPID(distRight);
+    // runEncoderPID();
+    // runWallPID(distLeft, distRight);
+    // delay(20);
 
-    // Serial.printf("Sensor 1: %d \t Sensor 2: %d \t Sensor 3: %d\n", distLeft, distFront, distRight);
-    // delay(200);
-    // Serial.printf("Bot at (%d, %d), orient: %d \n", posX, posY, orientation);
+    Serial.printf("Sensor 1: %d \t Sensor 2: %d \t Sensor 3: %d\n", distLeft, distFront, distRight);
+    delay(200);
+    Serial.printf("Bot at (%d, %d), orient: %d \n", posX, posY, orientation);
     identifyBlock();
     floodfill();
     for (int i = 0; i < MAZESIZE; i++) {
