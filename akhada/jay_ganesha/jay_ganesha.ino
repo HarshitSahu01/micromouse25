@@ -1,4 +1,6 @@
-// mergedMaze2.ino
+// jay_ganesha.ino
+// With Back optimise
+// Good good code but gadbad rotation PIDs
 #include <Wire.h>
 #include <VL53L1X.h>
 #include <queue>
@@ -24,13 +26,6 @@ using namespace std;
 #define LEFT_ENC_B 15
 #define RIGHT_ENC_A 22
 #define RIGHT_ENC_B 23
-
-struct PIDControllerState {
-    float integral;
-    float prevError;
-
-    PIDControllerState() : integral(0.0), prevError(0.0) {}
-};
 
 volatile long leftTicks = 0;
 volatile long rightTicks = 0;
@@ -65,7 +60,7 @@ void IRAM_ATTR rightEncoderISR() {
 int timingBudget = 20; // in mm
 int frontThresh = 100;
 int baseSpeed = 240;
-int rotSpeed = 100; // 130
+int rotSpeed = 80; // 130
 int minSpeed = 80;
 
 const int MAZESIZE = 5;
@@ -80,6 +75,20 @@ int orientation = 2;
 float wallKp = 1.4;   // start small
 float wallKi = 0.0002; // start near zero
 float wallKd = 9;    // start small
+
+unsigned long lastMillis = 0;
+
+void setdelay() {
+  lastMillis = millis();
+}
+
+void mdelay(unsigned long duration) {
+  unsigned long elapsed = millis() - lastMillis;
+  if (elapsed < duration) {
+    delay(duration - elapsed);
+  }
+  lastMillis = millis();
+}
 
 // ---------------- Distances ----------------
 int distLeft, distRight, distFront;
@@ -133,6 +142,7 @@ void moveForward(int distCm) {
   wallError = wallInt = wallPrev = 0;
   encoderError = encoderInt = encoderPrev = 0;
 
+    setdelay();
   while (true) {
     int avgTicks = (abs(leftTicks) + abs(rightTicks)) / 2;
 
@@ -197,7 +207,7 @@ void moveForward(int distCm) {
 
     mspeed(leftSpeed, rightSpeed);
 
-    delay(20); // loop cadence
+    mdelay(20); // loop cadence
   } // while
 
   // gentle stop
@@ -296,6 +306,7 @@ int nextBlock() {
 }
 
 float encoderCountToDegrees = 0.945;
+// float encoderCountToDegrees = 0.9;
 // float encoderCountToDegrees = 0.93;
 int dynSpeed = 80;
 void rotate(int degree) {
@@ -304,6 +315,7 @@ void rotate(int degree) {
     bool rotatingLeft = true, rotatingRight = true;
     leftTicks = rightTicks = 0;
 
+    setdelay();
     mspeed(dir * rotSpeed, -dir * rotSpeed);
     while (rotatingLeft or rotatingRight) {
         if (abs(leftTicks) > target) {
@@ -314,7 +326,7 @@ void rotate(int degree) {
             mspeed(300, 0);
             rotatingRight = false;
         }
-        delay(5);
+        mdelay(5);
     }
     mspeed(-dir * 80, dir * 80);
     delay(2);
@@ -365,6 +377,7 @@ void behaviorStep() {
         mspeed(-100, -100);
         delay(1);
 
+        setdelay();
         while (distFront < wf_clearanceThresh) {
             if (followLeft) {
                 mspeed(wf_rotationSpeed, -wf_rotationSpeed);
@@ -372,7 +385,7 @@ void behaviorStep() {
             else {
                 mspeed(-wf_rotationSpeed, wf_rotationSpeed);
             }
-            delay(timingBudget);
+            mdelay(timingBudget);
             updateSensors();
         }
         return;
@@ -388,6 +401,7 @@ void behaviorStep() {
 
 void setupSensors() {
     Wire.begin(33, 32);
+    Wire.setClock(400000);
 
     // --- Step 1: Reset all sensors ---
     pinMode(XSHUT1, OUTPUT);
@@ -476,10 +490,11 @@ void calibrate() {
     int epoch = 10;
     targetLeftDist = targetRightDist = 0;
 
+    setdelay();
     for (int i = 0; i < epoch; i++) {
         targetLeftDist += sensor1.read();
         targetRightDist += sensor3.read();
-        delay(timingBudget);
+        mdelay(timingBudget);
     }
     targetLeftDist /= epoch;
     targetRightDist /= epoch;
@@ -553,6 +568,7 @@ void setup() {
     // }
 }
 
+int optimise_run = false;
 void mazeSolver() {
     while (1) {
         identifyBlock();
@@ -568,21 +584,30 @@ void mazeSolver() {
                 digitalWrite(LED2, LOW);
                 delay(50);
             }
-            followWall = true;
-            delay(500);
-            return;
+            // followWall = true;
+            // delay(500);
+            // return;
+            if (!optimise_run) {
+                targetX=0;
+                targetY=0;
+            } else {
+                targetX=MAZESIZE-1;
+                targetY=MAZESIZE-1;
+            }
+            break;
         }
         rotate(degrees);
-        delay(200);
+        delay(100);
         moveForward(blockSize);
-        delay(200);
+        delay(100);
     }
 }
 
 void wallFollower() {
+    setdelay();
     while(1) {
         behaviorStep();
-        delay(timingBudget);
+        mdelay(timingBudget);
         if (digitalRead(BTN1) == 1 or digitalRead(BTN2) == 1) {
             mspeed(0, 0);
             delay(500);

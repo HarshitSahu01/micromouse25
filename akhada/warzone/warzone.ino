@@ -1,4 +1,4 @@
-// mergedMaze2.ino
+// mergedKartik.ino
 #include <Wire.h>
 #include <VL53L1X.h>
 #include <queue>
@@ -66,42 +66,36 @@ int timingBudget = 20; // in mm
 int frontThresh = 100;
 int baseSpeed = 240;
 int rotSpeed = 100; // 130
-int minSpeed = 80;
 
 const int MAZESIZE = 5;
-int targetX = MAZESIZE - 1, targetY = MAZESIZE - 1;
-int blockSize = 25;
 int maze[MAZESIZE][MAZESIZE];
 int flood[MAZESIZE][MAZESIZE];
 int posX = 0, posY = 0; // Current position in the maze
 int orientation = 2;
 
 // ---------------- PID variables ----------------
-float wallKp = 1.4;   // start small
+float wallKp = 1.2;   // start small
 float wallKi = 0.0002; // start near zero
-float wallKd = 9;    // start small
+float wallKd = 10.1;    // start small
 
 // ---------------- Distances ----------------
 int distLeft, distRight, distFront;
-int targetLeftDist = 97, targetRightDist = 97;
+int targetLeftDist, targetRightDist;
 
 const int wf_clearanceThresh = 200;
 const int wf_baseSpeed = 245;     // Further reduced for better control
 const int wf_targetDist = 80;     // mm desired wall distance
 const int wf_frontThresh = 120;   // Reduced threshold for earlier detection
-const int wf_wallThresh = 100;    // Increased for better wall detection
+const int wf_wallThresh = 110;    // Increased for better wall detection
 const int wf_outerSpeed = 245;    //255 Reduced for smoother turns
 const int wf_innerSpeed = 80;     //80 Increased minimum for better movement
 const int wf_rotationSpeed = 100; // Further reduced for better accuracy
 
 // ---------------- Wall PID ----------------
-float wf_Kp = 1.3;             // Increased for better response
+float wf_Kp = 1.2;             // Increased for better response
 float wf_baseSpeedKi = 0.0002; // Increased for steady-state accuracy
 float wf_Kd = 10;            // Increased for stability
 float wf_pidPrev = 0, wf_pidInt = 0;
-
-float wallWeight = 0.9f;
-float encoderWeight = 0.5f;
 
 bool followLeft = false;
 bool followWall = false;
@@ -111,101 +105,116 @@ void updateSensors() {
     distFront = sensor2.read();
     distRight = sensor3.read();
 }
+// 💡 IMPROVEMENT 1: Create a structure to hold PID
+
+// --- Instantiate a separate state for each control mode ---
+PIDControllerState bothWallState;
+PIDControllerState rightWallState;
+PIDControllerState leftWallState;
+PIDControllerState encoderState;
+
+// --- Refactored PID functions now take their state as an argument ---
+
+void runWallPID(int dL, int dR, PIDControllerState &state) {
+    float error = dL - dR; // Try to keep this difference zero (centered)
+    state.integral += error;
+    state.integral = constrain(state.integral, -1000, 1000);
+    float derivative = error - state.prevError;
+    state.prevError = error;
+
+    float pidOutput = wallKp * error + wallKi * state.integral + wallKd * derivative;
+
+    int leftSpeed = constrain(baseSpeed - pidOutput, 0, 255);
+    int rightSpeed = constrain(baseSpeed + pidOutput, 0, 255);
+    mspeed(leftSpeed, rightSpeed);
+}
+
+void runRightWallPID(int dR, int targetDist, PIDControllerState &state) {
+    float error = targetDist - dR; // If dR is too big, error is negative -> turn right
+    state.integral += error;
+    state.integral = constrain(state.integral, -1000, 1000);
+    float derivative = error - state.prevError;
+    state.prevError = error;
+
+    float pidOutput = wallKp * error + wallKi * state.integral + wallKd * derivative;
+
+    int leftSpeed = constrain(baseSpeed - pidOutput, 0, 255);
+    int rightSpeed = constrain(baseSpeed + pidOutput, 0, 255);
+    mspeed(leftSpeed, rightSpeed);
+}
+
+void runLeftWallPID(int dL, int targetDist, PIDControllerState &state) {
+    // BUG FIX: Error calculation is now inverted.
+    // If dL is too big, error is negative -> turn right (towards wall).
+    float error = targetDist - dL;
+    state.integral += error;
+    state.integral = constrain(state.integral, -1000, 1000);
+    float derivative = error - state.prevError;
+    state.prevError = error;
+
+    float pidOutput = wallKp * error + wallKi * state.integral + wallKd * derivative;
+
+    // For left wall, a positive error (too close) should make us turn right.
+    // Turning right means speeding up left wheel and slowing down right.
+    int leftSpeed = constrain(baseSpeed + pidOutput, 0, 255);
+    int rightSpeed = constrain(baseSpeed - pidOutput, 0, 255);
+    mspeed(leftSpeed, rightSpeed);
+}
+
+void runEncoderPID(PIDControllerState &state) {
+    float error = leftTicks - rightTicks; // Keep encoder difference at zero
+    state.integral += error;
+    state.integral = constrain(state.integral, -1000, 1000);
+    float derivative = error - state.prevError;
+    state.prevError = error;
+
+    float pidOutput = wallKp * error + wallKi * state.integral + wallKd * derivative;
+
+    int leftSpeed = constrain(baseSpeed - pidOutput, 0, 255);
+    int rightSpeed = constrain(baseSpeed + pidOutput, 0, 255);
+    mspeed(leftSpeed, rightSpeed);
+}
 
 // --- Main forward movement logic ---
 float cmToEncoderTicks = 10.3;
-const float slowRate = 20;
-float encKp=wallKp, encKi=wallKi, encKd=wallKd;
-// --- Global PID states (single set) ---
-float wallError = 0, wallInt = 0, wallPrev = 0;
-float encoderError = 0, encoderInt = 0, encoderPrev = 0;       
+void moveForward(int dist) {
+    int target = cmToEncoderTicks * dist; // 25 cm
+    leftTicks = rightTicks = 0;
+    int error = 10;
 
-void moveForward(int distCm) {
-  if (distCm <= 0) return;
+    // Reset all PID states before starting a new movement.
+    bothWallState = {};
+    rightWallState = {};
+    leftWallState = {};
+    encoderState = {};
 
-  // compute target ticks (long to avoid overflow)
-  long targetTicks = (long)roundf(cmToEncoderTicks * (float)distCm);
-  if (targetTicks <= 0) return;
+    // 💡 IMPROVEMENT 3: Loop until the AVERAGE distance is met.
+    while ((abs(leftTicks) + abs(rightTicks)) / 2 < target) {
+        updateSensors();
+        if (distFront < frontThresh)
+            break;
 
-  // reset encoders and PID state (ints)
-  leftTicks = 0;
-  rightTicks = 0;
-  wallError = wallInt = wallPrev = 0;
-  encoderError = encoderInt = encoderPrev = 0;
+        bool isWallLeft = (distLeft < targetLeftDist + error);
+        bool isWallRight = (distRight < targetRightDist + error);
 
-  while (true) {
-    int avgTicks = (abs(leftTicks) + abs(rightTicks)) / 2;
-
-    if ((long)avgTicks >= targetTicks) break; // reached goal
-
-    // --- progress & dynamicSpeed (floats) ---
-    float progress = (float)avgTicks / (float)targetTicks;        // 0.0 .. 1.0
-    // clamp progress
-    if (progress < 0.0f) progress = 0.0f;
-    if (progress > 1.0f) progress = 1.0f;
-
-    // exponential slow-down (float)
-    float dynamicSpeed = (float)baseSpeed - powf(progress, slowRate) * ((float)baseSpeed - (float)minSpeed);
-    // make sure within bounds
-    if (dynamicSpeed < (float)minSpeed) dynamicSpeed = (float)minSpeed;
-    if (dynamicSpeed > (float)baseSpeed) dynamicSpeed = (float)baseSpeed;
-
-    // --- sensor update & emergency stop ---
-    updateSensors();
-    if (distFront < frontThresh) break;
-
-    // --- Wall PID (int math) ---
-    bool hasLeftWall  = (distLeft  < targetLeftDist + 20);
-    bool hasRightWall = (distRight < targetRightDist + 20);
-
-    if (hasLeftWall && hasRightWall) {
-      wallError = distLeft - distRight;
-    } else if (hasRightWall) {
-      wallError = targetRightDist - distRight;
-    } else if (hasLeftWall) {
-      wallError = distLeft - targetLeftDist;
-    } else {
-      wallError = 0;
+        if (isWallLeft && isWallRight) {
+            runWallPID(distLeft, distRight, bothWallState);
+        }
+        else if (isWallLeft) {
+            runLeftWallPID(distLeft, targetLeftDist, leftWallState);
+        }
+        else if (isWallRight) {
+            runRightWallPID(distRight, targetRightDist, rightWallState);
+        }
+        else {
+            runEncoderPID(encoderState);
+        }
+        delay(20); // A small delay is good for PID stability
     }
-    wallInt += wallError;
-    wallInt = constrain(wallInt, -100000, 100000);
-    int wallDeriv = wallError - wallPrev;
-    wallPrev = wallError;
-    int wallPIDValue = wallKp * wallError + wallKi * wallInt + wallKd * wallDeriv;
-
-    // --- Encoder PID (int math) ---
-    encoderError = leftTicks - rightTicks;
-    encoderInt += encoderError;
-    encoderInt = constrain(encoderInt, -100000, 100000);
-    int encDeriv = encoderError - encoderPrev;
-    encoderPrev = encoderError;
-    int encoderPIDValue = encKp * encoderError + encKi * encoderInt + encKd * encDeriv;
-
-    // --- Merge corrections (float totalCorrection) ---
-    int totalCorrection = encoderWeight * encoderPIDValue + wallWeight * wallPIDValue;
-
-    // Debug print: two ints, two ints, then two floats
-    Serial.printf("%d %d\t %d %d\t %d\t %f %f\n",
-                  leftTicks, rightTicks, wallPIDValue, encoderPIDValue, totalCorrection, progress, dynamicSpeed);
-
-    // --- apply speeds (convert to int safely) ---
-    int leftSpeed  = dynamicSpeed - totalCorrection;
-    int rightSpeed = dynamicSpeed + totalCorrection;
-
-    leftSpeed  = constrain(leftSpeed, -255, 255);
-    rightSpeed = constrain(rightSpeed, -255, 255);
-
-    mspeed(leftSpeed, rightSpeed);
-
-    delay(20); // loop cadence
-  } // while
-
-  // gentle stop
-  mspeed(-60, -60);
-  delay(2);
-  mspeed(0, 0);
+    mspeed(-60, -60);
+    delay(2);
+    mspeed(0, 0);
 }
-
 
 void identifyBlock() {
     uint8_t a[4], b[4];
@@ -238,6 +247,7 @@ void identifyBlock() {
 }
 
 void floodfill() {
+    int targetX = MAZESIZE - 1, targetY = MAZESIZE - 1;
     memset(flood, -1, MAZESIZE * MAZESIZE * sizeof(int));
     flood[targetX][targetY] = 0;
 
@@ -536,10 +546,10 @@ void setup() {
     Serial.println("Starting");
     delay(1000);
 
-    // while (1) {
-    //     moveForward(27);
-    //     delay(2000);
-    // }
+    while (1) {
+        moveForward(27);
+        delay(2000);
+    }
 
     // while (1) {
     //     if (digitalRead(BTN1) == HIGH) {
@@ -560,21 +570,21 @@ void mazeSolver() {
         int degrees = nextBlock();
         while (degrees == -1) {
             Serial.println("End of the maze");
-            for (int i = 0; i < 30; i++) {
-                digitalWrite(LED1, HIGH);
-                digitalWrite(LED2, HIGH);
-                delay(50);
-                digitalWrite(LED1, LOW);
-                digitalWrite(LED2, LOW);
-                delay(50);
-            }
-            followWall = true;
+            // for (int i = 0; i < 30; i++) {
+            //     digitalWrite(LED1, HIGH);
+            //     digitalWrite(LED2, HIGH);
+            //     delay(50);
+            //     digitalWrite(LED1, LOW);
+            //     digitalWrite(LED2, LOW);
+            //     delay(50);
+            // }
+            // followWall = true;
             delay(500);
-            return;
+            // return;
         }
         rotate(degrees);
         delay(200);
-        moveForward(blockSize);
+        moveForward(25);
         delay(200);
     }
 }

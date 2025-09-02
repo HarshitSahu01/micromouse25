@@ -1,4 +1,6 @@
-// mergedMaze2.ino
+// jay_ganesha_1.ino
+// Rotation PID!!!!
+// Good Good optimizations
 #include <Wire.h>
 #include <VL53L1X.h>
 #include <queue>
@@ -24,13 +26,6 @@ using namespace std;
 #define LEFT_ENC_B 15
 #define RIGHT_ENC_A 22
 #define RIGHT_ENC_B 23
-
-struct PIDControllerState {
-    float integral;
-    float prevError;
-
-    PIDControllerState() : integral(0.0), prevError(0.0) {}
-};
 
 volatile long leftTicks = 0;
 volatile long rightTicks = 0;
@@ -64,8 +59,8 @@ void IRAM_ATTR rightEncoderISR() {
 
 int timingBudget = 20; // in mm
 int frontThresh = 100;
-int baseSpeed = 240;
-int rotSpeed = 100; // 130
+int baseSpeed = 220;
+int rotSpeed = 80; // 130
 int minSpeed = 80;
 
 const int MAZESIZE = 5;
@@ -80,6 +75,20 @@ int orientation = 2;
 float wallKp = 1.4;   // start small
 float wallKi = 0.0002; // start near zero
 float wallKd = 9;    // start small
+
+unsigned long lastMillis = 0;
+
+void setdelay() {
+  lastMillis = millis();
+}
+
+void mdelay(unsigned long duration) {
+  unsigned long elapsed = millis() - lastMillis;
+  if (elapsed < duration) {
+    delay(duration - elapsed);
+  }
+  lastMillis = millis();
+}
 
 // ---------------- Distances ----------------
 int distLeft, distRight, distFront;
@@ -114,7 +123,7 @@ void updateSensors() {
 
 // --- Main forward movement logic ---
 float cmToEncoderTicks = 10.3;
-const float slowRate = 20;
+const float slowRate = 15;
 float encKp=wallKp, encKi=wallKi, encKd=wallKd;
 // --- Global PID states (single set) ---
 float wallError = 0, wallInt = 0, wallPrev = 0;
@@ -133,10 +142,10 @@ void moveForward(int distCm) {
   wallError = wallInt = wallPrev = 0;
   encoderError = encoderInt = encoderPrev = 0;
 
+    setdelay();
   while (true) {
     int avgTicks = (abs(leftTicks) + abs(rightTicks)) / 2;
-
-    if ((long)avgTicks >= targetTicks) break; // reached goal
+    if (avgTicks >= targetTicks) break; // reached goal
 
     // --- progress & dynamicSpeed (floats) ---
     float progress = (float)avgTicks / (float)targetTicks;        // 0.0 .. 1.0
@@ -197,7 +206,7 @@ void moveForward(int distCm) {
 
     mspeed(leftSpeed, rightSpeed);
 
-    delay(20); // loop cadence
+    // mdelay(timingBudget); // loop cadence
   } // while
 
   // gentle stop
@@ -270,56 +279,99 @@ int rotationDirections[4] = {0, 90, 180, -90}; // 0: forward, 1: right, 2: backw
 int nextBlock() {
     int target = -1;
     int oldOrient = orientation;
-    if (posX > 0 and flood[posX - 1][posY] == flood[posX][posY] - 1 and (maze[posX][posY] & 1) != 1) {
-        target = 0;
-        posX -= 1; // Move left
-        orientation = 0;
+    if (posY < MAZESIZE - 1 and flood[posX][posY + 1] == flood[posX][posY] - 1 and (maze[posX][posY] & 2) != 2) {
+        target = 1;
+        posY += 1; // Move right
+        orientation = 1;
     }
     else if (posX < MAZESIZE - 1 and flood[posX + 1][posY] == flood[posX][posY] - 1 and (maze[posX][posY] & 4) != 4) {
         target = 2;
-        posX += 1; // Move right
+        posX += 1; // Move down
         orientation = 2;
     }
     else if (posY > 0 and flood[posX][posY - 1] == flood[posX][posY] - 1 and (maze[posX][posY] & 8) != 8) {
         target = 3;
-        posY -= 1; // Move forward
+        posY -= 1; // Move left
         orientation = 3;
     }
-    else if (posY < MAZESIZE - 1 and flood[posX][posY + 1] == flood[posX][posY] - 1 and (maze[posX][posY] & 2) != 2) {
-        target = 1;
-        posY += 1; // Move backward
-        orientation = 1;
+    else if (posX > 0 and flood[posX - 1][posY] == flood[posX][posY] - 1 and (maze[posX][posY] & 1) != 1) {
+        target = 0;
+        posX -= 1; // Move up
+        orientation = 0;
     }
     if (target == -1)
         return -1;
     return rotationDirections[(orientation - oldOrient + 4) % 4];
 }
 
-float encoderCountToDegrees = 0.945;
-// float encoderCountToDegrees = 0.93;
-int dynSpeed = 80;
-void rotate(int degree) {
-    int target = encoderCountToDegrees * abs(degree);
-    int dir = degree > 0 ? 1 : -1;
-    bool rotatingLeft = true, rotatingRight = true;
-    leftTicks = rightTicks = 0;
+// ---------------- Rotation with PID ----------------
+// float encoderCountToDegrees = 0.945;   // calibration factor
+float encoderCountToDegrees = 0.85;   // calibration factor
+int rotBaseSpeed = 120;                // base rotation speed
+int rotMaxSpeed = 200;                 // clamp for safety
 
-    mspeed(dir * rotSpeed, -dir * rotSpeed);
-    while (rotatingLeft or rotatingRight) {
-        if (abs(leftTicks) > target) {
-            mspeed(0, 300);
+// PID constants (roughly estimated for micromouse 300 rpm motors)
+float rotation_kp = 2.0;     // proportional gain
+float rotation_ki = 0.002;    // integral gain (small, avoids bias drift)
+float rotation_kd = 1.5;     // derivative gain
+
+void rotate(int degree) {
+    long targetTicks = encoderCountToDegrees * abs(degree);
+    int dir = (degree > 0) ? 1 : -1;
+
+    // Reset encoder counts
+    noInterrupts();
+    leftTicks = 0;
+    rightTicks = 0;
+    interrupts();
+
+    // Reset PID state
+    float error = 0, prevError = 0, integral = 0;
+    bool rotatingLeft = true, rotatingRight = true;
+
+    while (rotatingLeft || rotatingRight) {
+        // Compute progress of each wheel
+        long leftAbs = abs(leftTicks);
+        long rightAbs = abs(rightTicks);
+
+        // Stop each motor independently when its target reached
+        if (leftAbs >= targetTicks) {
+            mspeed(-40, 300);
             rotatingLeft = false;
         }
-        if (abs(rightTicks) > target) {
-            mspeed(300, 0);
+        if (rightAbs >= targetTicks) {
+            mspeed(300, -40);
             rotatingRight = false;
         }
-        delay(5);
+        if (!(rotatingLeft || rotatingRight)) break;
+
+        // PID on difference in encoder counts
+        error = (leftAbs - rightAbs);         // balance error
+        integral += error;
+        integral = constrain(integral, -500, 500);  // anti-windup
+        float derivative = error - prevError;
+        prevError = error;
+
+        float correction = rotation_kp * error + rotation_ki * integral + rotation_kd * derivative;
+
+        // Apply correction symmetrically
+        int leftSpeed  = dir * (rotBaseSpeed - correction);
+        int rightSpeed = -dir * (rotBaseSpeed + correction);
+
+        // Constrain speeds
+        leftSpeed  = constrain(leftSpeed, -rotMaxSpeed, rotMaxSpeed);
+        rightSpeed = constrain(rightSpeed, -rotMaxSpeed, rotMaxSpeed);
+
+        mspeed(leftSpeed, rightSpeed);
     }
+
+    // Small counter-brake to rotation_kill inertia
     mspeed(-dir * 80, dir * 80);
-    delay(2);
+    delay(5);
     mspeed(0, 0);
+    Serial.printf("Target was %d, it traveled %d %d \n", targetTicks, leftTicks, rightTicks);
 }
+
 
 // ---------------- PID routines ----------------
 void runWallPIDSingle(int measured, int desired, bool invertMirror) {
@@ -365,6 +417,7 @@ void behaviorStep() {
         mspeed(-100, -100);
         delay(1);
 
+        setdelay();
         while (distFront < wf_clearanceThresh) {
             if (followLeft) {
                 mspeed(wf_rotationSpeed, -wf_rotationSpeed);
@@ -372,7 +425,7 @@ void behaviorStep() {
             else {
                 mspeed(-wf_rotationSpeed, wf_rotationSpeed);
             }
-            delay(timingBudget);
+            mdelay(timingBudget);
             updateSensors();
         }
         return;
@@ -388,6 +441,7 @@ void behaviorStep() {
 
 void setupSensors() {
     Wire.begin(33, 32);
+    Wire.setClock(400000);
 
     // --- Step 1: Reset all sensors ---
     pinMode(XSHUT1, OUTPUT);
@@ -476,10 +530,11 @@ void calibrate() {
     int epoch = 10;
     targetLeftDist = targetRightDist = 0;
 
+    setdelay();
     for (int i = 0; i < epoch; i++) {
         targetLeftDist += sensor1.read();
         targetRightDist += sensor3.read();
-        delay(timingBudget);
+        mdelay(timingBudget);
     }
     targetLeftDist /= epoch;
     targetRightDist /= epoch;
@@ -537,8 +592,14 @@ void setup() {
     delay(1000);
 
     // while (1) {
-    //     moveForward(27);
-    //     delay(2000);
+    //     // rotate(90);
+    //     // delay(1000);
+    //     // rotate(180);
+    //     // delay(1000);
+    //     // rotate(-90);
+    //     // delay(1000);
+    //     rotate(360);
+    //     delay(3000);
     // }
 
     // while (1) {
@@ -553,6 +614,7 @@ void setup() {
     // }
 }
 
+int optimise_run = false;
 void mazeSolver() {
     while (1) {
         identifyBlock();
@@ -560,7 +622,7 @@ void mazeSolver() {
         int degrees = nextBlock();
         while (degrees == -1) {
             Serial.println("End of the maze");
-            for (int i = 0; i < 30; i++) {
+            for (int i = 0; i < 20; i++) {
                 digitalWrite(LED1, HIGH);
                 digitalWrite(LED2, HIGH);
                 delay(50);
@@ -571,18 +633,27 @@ void mazeSolver() {
             followWall = true;
             delay(500);
             return;
+            // if (!optimise_run) {
+            //     targetX=0;
+            //     targetY=0;
+            // } else {
+            //     targetX=MAZESIZE-1;
+            //     targetY=MAZESIZE-1;
+            // }
+            break;
         }
         rotate(degrees);
-        delay(200);
+        delay(100);
         moveForward(blockSize);
-        delay(200);
+        delay(100);
     }
 }
 
 void wallFollower() {
+    setdelay();
     while(1) {
         behaviorStep();
-        delay(timingBudget);
+        mdelay(timingBudget);
         if (digitalRead(BTN1) == 1 or digitalRead(BTN2) == 1) {
             mspeed(0, 0);
             delay(500);
