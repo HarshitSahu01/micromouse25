@@ -1,6 +1,5 @@
-// jay_ganesha_1.ino
-// Rotation PID!!!!
-// Good Good optimizations
+// jay_ganesha_2.ino
+// Not working correctly
 #include <Wire.h>
 #include <VL53L1X.h>
 #include <queue>
