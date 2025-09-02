@@ -60,7 +60,7 @@ void IRAM_ATTR rightEncoderISR() {
 int timingBudget = 20; // in mm
 int frontThresh = 100;
 int baseSpeed = 220;
-int rotSpeed = 80; // 130
+int rotSpeed = 80;
 int minSpeed = 80;
 
 const int MAZESIZE = 5;
@@ -72,7 +72,7 @@ int posX = 0, posY = 0; // Current position in the maze
 int orientation = 2;
 
 // ---------------- PID variables ----------------
-float wallKp = 1.4;   // start small
+float wallKp = 1.7;   // start small
 float wallKi = 0.0002; // start near zero
 float wallKd = 9;    // start small
 
@@ -592,10 +592,10 @@ void setup() {
     Serial.println("Starting");
     delay(1000);
 
-    while(1) {
-        moveForward(25);
-        delay(500);
-    }
+    // while(1) {
+    //     moveForward(25);
+    //     delay(500);
+    // }
 
     // while (1) {
     //     // rotate(90);
