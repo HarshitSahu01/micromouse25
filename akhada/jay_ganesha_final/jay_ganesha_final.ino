@@ -1,6 +1,5 @@
-// jay_ganesha_1.ino
-// Rotation PID!!!!
-// Good Good optimizations
+// jay_ganesha_3.ino
+// Better front thresh, increased to 120 from 110
 #include <Wire.h>
 #include <VL53L1X.h>
 #include <queue>
@@ -58,14 +57,14 @@ void IRAM_ATTR rightEncoderISR() {
 }
 
 int timingBudget = 20; // in mm
-int frontThresh = 100;
+int frontThresh = 110;
 int baseSpeed = 220;
 int rotSpeed = 80; // 130
 int minSpeed = 80;
 
-const int MAZESIZE = 5;
+const int MAZESIZE = 16;
 int targetX = MAZESIZE - 1, targetY = MAZESIZE - 1;
-int blockSize = 25;
+int blockSize = 27;
 int maze[MAZESIZE][MAZESIZE];
 int flood[MAZESIZE][MAZESIZE];
 int posX = 0, posY = 0; // Current position in the maze
@@ -94,12 +93,12 @@ void mdelay(unsigned long duration) {
 int distLeft, distRight, distFront;
 int targetLeftDist = 97, targetRightDist = 97;
 
-const int wf_clearanceThresh = 200;
-const int wf_baseSpeed = 245;     // Further reduced for better control
+const int wf_clearanceThresh = 180;
+const int wf_baseSpeed = 255;     // Further reduced for better control
 const int wf_targetDist = 80;     // mm desired wall distance
-const int wf_frontThresh = 120;   // Reduced threshold for earlier detection
+const int wf_frontThresh = 140;   // Reduced threshold for earlier detection
 const int wf_wallThresh = 100;    // Increased for better wall detection
-const int wf_outerSpeed = 245;    //255 Reduced for smoother turns
+const int wf_outerSpeed = 255;    //255 Reduced for smoother turns
 const int wf_innerSpeed = 80;     //80 Increased minimum for better movement
 const int wf_rotationSpeed = 200; // Further reduced for better accuracy
 
@@ -194,8 +193,8 @@ void moveForward(int distCm) {
     int totalCorrection = encoderWeight * encoderPIDValue + wallWeight * wallPIDValue;
 
     // Debug print: two ints, two ints, then two floats
-    Serial.printf("%d %d\t %d %d\t %d\t %f %f\n",
-                  leftTicks, rightTicks, wallPIDValue, encoderPIDValue, totalCorrection, progress, dynamicSpeed);
+    // Serial.printf("%d %d\t %d %d\t %d\t %f %f\n",
+    //               leftTicks, rightTicks, wallPIDValue, encoderPIDValue, totalCorrection, progress, dynamicSpeed);
 
     // --- apply speeds (convert to int safely) ---
     int leftSpeed  = dynamicSpeed - totalCorrection;
@@ -263,6 +262,7 @@ void floodfill() {
         if (x < MAZESIZE - 1 and flood[x + 1][y] == -1 and (maze[x][y] & 4) != 4) {
             flood[x + 1][y] = flood[x][y] + 1;
             q.push({x + 1, y});
+            
         }
         if (y > 0 and flood[x][y - 1] == -1 and (maze[x][y] & 8) != 8) {
             flood[x][y - 1] = flood[x][y] + 1;
@@ -373,7 +373,6 @@ void rotate(int degree) {
     Serial.printf("Target was %d, it traveled %d %d \n", targetTicks, leftTicks, rightTicks);
 }
 
-
 // ---------------- PID routines ----------------
 void runWallPIDSingle(int measured, int desired, bool invertMirror) {
     // invertMirror == true -> mirror error (for right-wall case) so code below can be identical
@@ -429,8 +428,8 @@ void behaviorStep() {
             mdelay(timingBudget);
             updateSensors();
         }
-        if (followLeft) mspeed(-120, 120);
-        else mspeed(120, -120);
+        if (followLeft) mspeed(-80, 80);
+        else mspeed(80, -80);
         delay(2);
         mspeed(0, 0);
         return;
@@ -596,6 +595,21 @@ void setup() {
     Serial.println("Starting");
     delay(1000);
 
+    // while (1) {
+    //     if (digitalRead(BTN1) == 1) {
+    //         delay(500);
+    //         rotate(180);
+    //         delay(500);
+    //     }
+    // }
+
+    // while (1) {
+    //     if (digitalRead(BTN1) == HIGH) {
+    //         rotate(180);
+    //         delay(500);
+    //     }
+    // } 
+
     // while(1) {
     //     moveForward(25);
     //     delay(500);
@@ -632,16 +646,16 @@ void mazeSolver() {
         int degrees = nextBlock();
         while (degrees == -1) {
             Serial.println("End of the maze");
-            for (int i = 0; i < 20; i++) {
-                digitalWrite(LED1, HIGH);
-                digitalWrite(LED2, HIGH);
-                delay(50);
-                digitalWrite(LED1, LOW);
-                digitalWrite(LED2, LOW);
-                delay(50);
-            }
+            // for (int i = 0; i < 20; i++) {
+            //     digitalWrite(LED1, HIGH);
+            //     digitalWrite(LED2, HIGH);
+            //     delay(50);
+            //     digitalWrite(LED1, LOW);
+            //     digitalWrite(LED2, LOW);
+            //     delay(50);
+            // }
             followWall = true;
-            delay(500);
+            delay(100);
             return;
             // if (!optimise_run) {
             //     targetX=0;
@@ -677,6 +691,21 @@ void wallFollower() {
     }
 }
 
+void normalTurn () {
+    moveForward(blockSize);
+    moveForward(blockSize);
+    moveForward(blockSize);
+    moveForward(blockSize);
+    moveForward(blockSize);
+    moveForward(blockSize);
+    delay(100);
+    rotate(-90);
+    moveForward(blockSize);
+    followLeft = false;
+    followWall = true;
+    return;
+}
+
 void loop() {
     // Serial.printf("Follow Wall: %d, Follow Left: %d \n", followWall, followLeft);
     // delay(1000);
@@ -687,7 +716,9 @@ void loop() {
     } else {
         digitalWrite(LED1, HIGH);
         digitalWrite(LED2, HIGH);
-        mazeSolver();
+        // mazeSolver();
+        normalTurn();
+
     }
 }
 

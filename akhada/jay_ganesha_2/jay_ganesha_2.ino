@@ -71,9 +71,9 @@ int posX = 0, posY = 0; // Current position in the maze
 int orientation = 2;
 
 // ---------------- PID variables ----------------
-float wallKp = 1.7;   // start small
-float wallKi = 0.0002; // start near zero
-float wallKd = 9;    // start small
+float wallKp = 2.5;   // start small
+float wallKi = 0.02; // start near zero
+float wallKd = 10;    // start small
 
 unsigned long lastMillis = 0;
 
