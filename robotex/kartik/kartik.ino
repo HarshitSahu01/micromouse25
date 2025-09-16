@@ -1,7 +1,8 @@
-// jay_ganesha_3.ino
-// Better front thresh, increased to 120 from 110
+// jay_ganesha_4.ino
+// Added MPU9250 gyro-assisted turns for better accuracy
 #include <Wire.h>
 #include <VL53L1X.h>
+#include <MPU9250.h>
 #include <queue>
 #include <utility>
 using namespace std;
@@ -34,7 +35,7 @@ volatile long rightTicks = 0;
 #define XSHUT2 27
 #define XSHUT3 25
 
-// I2C addresses we’ll assign
+// I2C addresses we'll assign
 #define ADDR1 0x30
 #define ADDR2 0x31
 #define ADDR3 0x32
@@ -43,6 +44,13 @@ volatile long rightTicks = 0;
 VL53L1X sensor1;
 VL53L1X sensor2;
 VL53L1X sensor3;
+MPU9250 mpu;
+
+// Gyro variables
+float gyroZ_offset = 0;
+float currentHeading = 0;
+bool gyroEnabled = true;
+float fusionBeta = 0.7; // Weight for encoder vs gyro fusion (0.7 = 70% encoder, 30% gyro)
 
 void IRAM_ATTR leftEncoderISR() {
     bool a = digitalRead(LEFT_ENC_A);
@@ -57,18 +65,14 @@ void IRAM_ATTR rightEncoderISR() {
 }
 
 int timingBudget = 20; // in mm
-int frontThresh = 50;
-int frontSlowThresh = 110;
+int frontThresh = 100;
 int baseSpeed = 220;
 int rotSpeed = 80; // 130
 int minSpeed = 80;
 
 const int MAZESIZE = 5;
 int targetX = MAZESIZE - 1, targetY = MAZESIZE - 1;
-const int BLOCKSIZE = 180;
-int blockSize = BLOCKSIZE;
-int rotationAxisCorrection=30;
-
+int blockSize = 18;
 int maze[MAZESIZE][MAZESIZE];
 int flood[MAZESIZE][MAZESIZE];
 int posX = 0, posY = 0; // Current position in the maze
@@ -93,23 +97,69 @@ void mdelay(unsigned long duration) {
   lastMillis = millis();
 }
 
+// ---------------- MPU9250 Functions ----------------
+void setupGyro() {
+    if (mpu.setup(0x68)) { // MPU9250 default I2C address
+        Serial.println("MPU9250 initialized successfully");
+        
+        // Calibrate gyro offset
+        Serial.println("Calibrating gyro... keep robot still");
+        delay(1000);
+        
+        float offsetSum = 0;
+        for (int i = 0; i < 100; i++) {
+            mpu.update();
+            offsetSum += mpu.getGyroZ();
+            delay(10);
+        }
+        gyroZ_offset = offsetSum / 100.0;
+        Serial.printf("Gyro Z offset: %.3f\n", gyroZ_offset);
+        gyroEnabled = true;
+    } else {
+        Serial.println("MPU9250 connection failed - using encoder-only mode");
+        gyroEnabled = false;
+    }
+}
+
+void updateGyro() {
+    if (!gyroEnabled) return;
+    
+    static unsigned long lastGyroUpdate = 0;
+    unsigned long now = millis();
+    
+    if (now - lastGyroUpdate >= 5) { // Update at 200Hz
+        mpu.update();
+        float dt = (now - lastGyroUpdate) / 1000.0;
+        float gyroRate = mpu.getGyroZ() - gyroZ_offset;
+        currentHeading += gyroRate * dt;
+        lastGyroUpdate = now;
+    }
+}
+
+void resetHeading() {
+    currentHeading = 0;
+    if (gyroEnabled) {
+        mpu.update(); // Fresh reading
+    }
+}
+
 // ---------------- Distances ----------------
 int distLeft, distRight, distFront;
-int targetLeftDist = 54, targetRightDist = 54;
+int targetLeftDist = 97, targetRightDist = 97;
 
-const int wf_clearanceThresh = 130;
+const int wf_clearanceThresh = 180;
 const int wf_baseSpeed = 255;     // Further reduced for better control
-const int wf_targetDist = 50;     // mm desired wall distance
+const int wf_targetDist = 80;     // mm desired wall distance
 const int wf_frontThresh = 140;   // Reduced threshold for earlier detection
 const int wf_wallThresh = 100;    // Increased for better wall detection
-const int wf_outerSpeed = 245;    //255 Reduced for smoother turns
+const int wf_outerSpeed = 255;    //255 Reduced for smoother turns
 const int wf_innerSpeed = 80;     //80 Increased minimum for better movement
-const int wf_rotationSpeed = 150; //200  // Further reduced for better accuracy
+const int wf_rotationSpeed = 150; //200 // Further reduced for better accuracy
 
 // ---------------- Wall PID ----------------
-float wf_Kp = 1;             // Increased for better response
+float wf_Kp = 1.3;             // Increased for better response
 float wf_baseSpeedKi = 0.0002; // Increased for steady-state accuracy
-float wf_Kd = 9;            // Increased for stability
+float wf_Kd = 10;            // Increased for stability
 float wf_pidPrev = 0, wf_pidInt = 0;
 
 float wallWeight = 0.7f;
@@ -122,21 +172,22 @@ void updateSensors() {
     distLeft = sensor1.read();
     distFront = sensor2.read();
     distRight = sensor3.read();
+    updateGyro(); // Update gyro alongside distance sensors
 }
 
 // --- Main forward movement logic ---
-float cmToEncoderTicks = 1.03; // 10.3
-const float slowRate = 10;
+float cmToEncoderTicks = 10.3;
+const float slowRate = 25;
 float encKp=wallKp, encKi=wallKi, encKd=wallKd;
 // --- Global PID states (single set) ---
 float wallError = 0, wallInt = 0, wallPrev = 0;
 float encoderError = 0, encoderInt = 0, encoderPrev = 0;       
 
-void moveForward() {
-  if (blockSize <= 0) return;
+void moveForward(int distCm) {
+  if (distCm <= 0) return;
 
   // compute target ticks (long to avoid overflow)
-  long targetTicks = (long)roundf(cmToEncoderTicks * (float)blockSize);
+  long targetTicks = (long)roundf(cmToEncoderTicks * (float)distCm);
   if (targetTicks <= 0) return;
 
   // reset encoders and PID state (ints)
@@ -151,18 +202,20 @@ void moveForward() {
     if (avgTicks >= targetTicks) break; // reached goal
 
     // --- progress & dynamicSpeed (floats) ---
-    float progress = (float)avgTicks / (float)targetTicks;
-    progress = constrain(progress, 0.0f, 1.0f);
+    float progress = (float)avgTicks / (float)targetTicks;        // 0.0 .. 1.0
+    // clamp progress
+    if (progress < 0.0f) progress = 0.0f;
+    if (progress > 1.0f) progress = 1.0f;
 
     // exponential slow-down (float)
     float dynamicSpeed = (float)baseSpeed - powf(progress, slowRate) * ((float)baseSpeed - (float)minSpeed);
     // make sure within bounds
-    dynamicSpeed = constrain(dynamicSpeed, (float)minSpeed, (float)baseSpeed);
+    if (dynamicSpeed < (float)minSpeed) dynamicSpeed = (float)minSpeed;
+    if (dynamicSpeed > (float)baseSpeed) dynamicSpeed = (float)baseSpeed;
 
     // --- sensor update & emergency stop ---
     updateSensors();
     if (distFront < frontThresh) break;
-    if (distFront < frontSlowThresh) dynamicSpeed = 80;
 
     // --- Wall PID (int math) ---
     bool hasLeftWall  = (distLeft  < targetLeftDist + 30);
@@ -195,8 +248,8 @@ void moveForward() {
     int totalCorrection = encoderWeight * encoderPIDValue + wallWeight * wallPIDValue;
 
     // Debug print: two ints, two ints, then two floats
-    // Serial.printf("%d %d\t %d %d\t %d\t %f %f\n",
-    //               leftTicks, rightTicks, wallPIDValue, encoderPIDValue, totalCorrection, progress, dynamicSpeed);
+    Serial.printf("%d %d\t %d %d\t %d\t %f %f\n",
+                  leftTicks, rightTicks, wallPIDValue, encoderPIDValue, totalCorrection, progress, dynamicSpeed);
 
     // --- apply speeds (convert to int safely) ---
     int leftSpeed  = dynamicSpeed - totalCorrection;
@@ -207,21 +260,19 @@ void moveForward() {
 
     mspeed(leftSpeed, rightSpeed);
 
-    mdelay(timingBudget); // loop cadence
+    // mdelay(timingBudget); // loop cadence
   } // while
 
   // // gentle stop
-  blockSize = BLOCKSIZE;
-  delay(1);
-  mspeed(-60, -60);
-  delay(2);
-  mspeed(0, 0);
+  // mspeed(-60, -60);
+  // delay(2);
+  // mspeed(0, 0);
 }
 
 
 void identifyBlock() {
     uint8_t a[4], b[4];
-    int thresh = 100;
+    int thresh = 150;
 
     a[0] = sensor2.read() < thresh;
     a[1] = sensor3.read() < thresh;
@@ -307,89 +358,110 @@ int nextBlock() {
     return rotationDirections[(orientation - oldOrient + 4) % 4];
 }
 
-// ---------------- Rotation with PID ----------------
-// float degreeToEncoderTicks = 0.945;   // calibration factor
-// float degreeToEncoderTicks = 0.85;   // calibration factor
-float degreeToEncoderTicks = 0.89;   // calibration factor
+// ---------------- Enhanced Rotation with Gyro Fusion ----------------
+float encoderCountToDegrees = 0.945;   // calibration factor
 
-int rotBaseSpeed = 180;                // base rotation speed
-int rotMaxSpeed = 190;                 // clamp for safety
+int rotBaseSpeed = 120;                // base rotation speed
+int rotMaxSpeed = 200;                 // clamp for safety
 
-// PID constants (roughly estimated for micromouse 300 rpm motors)
-float rotation_kp = 2.0;     // proportional gain
-float rotation_ki = 0.002;    // integral gain (small, avoids bias drift)
-float rotation_kd = 1.5;     // derivative gain
+// PID constants for gyro-assisted rotation
+float rotation_kp = 2.5;     // slightly increased for gyro precision
+float rotation_ki = 0.003;   // slightly increased
+float rotation_kd = 2.0;     // increased for better damping
 
 void rotate(int degree) {
     if (degree == 0) return;
-    if (degree == 180) blockSize -= rotationAxisCorrection;
-    long targetTicks = degreeToEncoderTicks * abs(degree);
+    
+    long encoderTargetTicks = encoderCountToDegrees * abs(degree);
+    float gyroTargetAngle = (float)abs(degree);
     int dir = (degree > 0) ? 1 : -1;
 
-    // Reset encoder counts
+    // Reset encoder counts and heading
     noInterrupts();
     leftTicks = 0;
     rightTicks = 0;
     interrupts();
+    resetHeading();
 
     // Reset PID state
     float error = 0, prevError = 0, integral = 0;
     bool rotatingLeft = true, rotatingRight = true;
+    
+    Serial.printf("Starting rotation: %d degrees\n", degree);
 
     while (rotatingLeft || rotatingRight) {
-        // Compute progress of each wheel
+        updateGyro(); // Keep gyro updated during rotation
+        
+        // Compute encoder-based and gyro-based angles
         long leftAbs = abs(leftTicks);
         long rightAbs = abs(rightTicks);
+        long avgTicks = (leftAbs + rightAbs) / 2;
+        float encoderAngle = avgTicks / encoderCountToDegrees;
+        float gyroAngle = abs(currentHeading);
+        
+        // Fusion: combine encoder and gyro estimates
+        float fusedAngle;
+        if (gyroEnabled) {
+            fusedAngle = fusionBeta * encoderAngle + (1.0 - fusionBeta) * gyroAngle;
+        } else {
+            fusedAngle = encoderAngle;
+        }
+        
+        // Stop condition based on fused angle
+        if (fusedAngle >= gyroTargetAngle * 0.98) { // 98% of target for precision
+            break;
+        }
 
-        // Stop each motor independently when its target reached
-        if (leftAbs >= targetTicks) {
-            mspeed(-40, 300);
+        // Individual wheel stopping (keep for safety)
+        if (leftAbs >= encoderTargetTicks) {
             rotatingLeft = false;
         }
-        if (rightAbs >= targetTicks) {
-            mspeed(300, -40);
+        if (rightAbs >= encoderTargetTicks) {
             rotatingRight = false;
         }
-        if (!(rotatingLeft || rotatingRight)) break;
 
-        float progress = ((float)(leftAbs + rightAbs) / 2.0f) / (float)targetTicks;
-        progress = constrain(progress, 0.0f, 1.0f);
-        // Serial.printf("L: %d, R: %d, P: %f %f %f \n", leftAbs, rightAbs, progress, (float)(leftAbs + rightAbs) / 2, (float)(leftAbs + rightAbs) / 2 * (float)targetTicks);
-
-        float dynamicSpeed = (float)rotBaseSpeed - powf(progress, slowRate) * ((float)rotBaseSpeed - (float)minSpeed);
-
-        // make sure within bounds
-        dynamicSpeed = constrain(dynamicSpeed, (float)minSpeed, (float)baseSpeed);
-        // PID on difference in encoder counts
-        error = (leftAbs - rightAbs);         // balance error
+        // PID on encoder difference for balance
+        error = (leftAbs - rightAbs);
         integral += error;
-        integral = constrain(integral, -500, 500);  // anti-windup
+        integral = constrain(integral, -500, 500);
         float derivative = error - prevError;
         prevError = error;
 
         float correction = rotation_kp * error + rotation_ki * integral + rotation_kd * derivative;
 
-        // Apply correction symmetrically
-        int leftSpeed  = dir * (dynamicSpeed - correction);
-        int rightSpeed = -dir * (dynamicSpeed + correction);
+        // Apply speeds with correction
+        int leftSpeed  = dir * (rotBaseSpeed - correction);
+        int rightSpeed = -dir * (rotBaseSpeed + correction);
 
-        // Constrain speeds
         leftSpeed  = constrain(leftSpeed, -rotMaxSpeed, rotMaxSpeed);
         rightSpeed = constrain(rightSpeed, -rotMaxSpeed, rotMaxSpeed);
 
         mspeed(leftSpeed, rightSpeed);
-        // Serial.printf("Lspeed: %d,\t Rspeed: %d,\t progress: %f, \t Dspeed: %f\n", leftSpeed, rightSpeed, progress, dynamicSpeed);
+        delay(1); // Small delay for stability
     }
 
-    delay(1);
+    // Counter-brake
     mspeed(-dir * 80, dir * 80);
-    delay(2);
+    delay(5);
 
-    // Small counter-brake to rotation_kill inertia
+    // Special handling for 180-degree turns
+    if (abs(degree) == 180) {
+        leftTicks = rightTicks = 0;
+        while(abs(leftTicks + rightTicks)/2 <= 40) {
+            mspeed(-80, -80);
+        }
+    }
+
     mspeed(0, 0);
-    Serial.printf("Target was %d, it traveled %d %d \n", targetTicks, leftTicks, rightTicks);
+    
+    // Final readings for debugging
+    updateGyro();
+    float finalEncoderAngle = ((abs(leftTicks) + abs(rightTicks)) / 2) / encoderCountToDegrees;
+    float finalGyroAngle = abs(currentHeading);
+    
+    Serial.printf("Rotation complete - Target: %d°, Encoder: %.1f°, Gyro: %.1f°\n", 
+                  abs(degree), finalEncoderAngle, finalGyroAngle);
 }
-
 
 // ---------------- PID routines ----------------
 void runWallPIDSingle(int measured, int desired, bool invertMirror) {
@@ -562,8 +634,13 @@ void calibrate() {
     targetRightDist /= epoch;
 
     delay(1000);
-    // rotate(45);
-    // rotate(-45);
+    
+    // Test gyro-assisted turns during calibration
+    Serial.println("Testing gyro-assisted turns...");
+    rotate(45);
+    delay(500);
+    rotate(-45);
+    delay(500);
 }
 
 void waitButtonPress() {
@@ -601,122 +678,5 @@ void waitButtonPress() {
 void setup() {
     Serial.begin(115200);
     // Use custom I2C pins: SDA = 33, SCL = 32
-    // setupSensors();
-
-    setupMotorEncodersMore();
-
-    // calibrate();
-
-    Serial.println("Waiting for button press...");
-    // waitButtonPress();
-
-    Serial.println("Starting");
-    delay(1000);
-
-    // while(1) {
-    //     moveForward();
-    //     mspeed(0,0);
-    //     delay(500);
-    // }
-
-    while (1) {
-        if (digitalRead(BTN1) == HIGH) {
-            delay(1000);
-            rotate(720);
-            delay(100);
-        }
-        else if (digitalRead(BTN2) == HIGH) {
-            delay(1000);
-            rotate(-90);
-            delay(500);
-            rotate(180);
-            delay(500);
-            rotate(90);
-            delay(500);
-            rotate(360);
-
-        }
-        delay(50);
-    }
-
-}
-
-int optimise_run = false;
-void mazeSolver() {
-    while (1) {
-        identifyBlock();
-        floodfill();
-        int degrees = nextBlock();
-        while (degrees == -1) {
-            Serial.println("End of the maze");
-            // for (int i = 0; i < 20; i++) {
-            //     digitalWrite(LED1, HIGH);
-            //     digitalWrite(LED2, HIGH);
-            //     delay(50);
-            //     digitalWrite(LED1, LOW);
-            //     digitalWrite(LED2, LOW);
-            //     delay(50);
-            // }
-            followWall = true;
-            delay(100);
-            // return;
-            // if (!optimise_run) {
-            //     targetX=0;
-            //     targetY=0;
-            // } else {
-            //     targetX=MAZESIZE-1;
-            //     targetY=MAZESIZE-1;
-            // }
-        }
-        rotate(degrees);
-        delay(100);
-        moveForward();
-        delay(100);
-    }
-}
-
-void wallFollower() {
-    setdelay();
-    while(1) {
-        behaviorStep();
-        mdelay(timingBudget);
-        if (digitalRead(BTN1) == 1 or digitalRead(BTN2) == 1) {
-            mspeed(0, 0);
-            delay(500);
-            waitButtonPress();
-            delay(500);
-            posX = 0;
-            posY = 0;
-            orientation = 2;
-            return;
-        }
-    }
-}
-
-void loop() {
-    // Serial.printf("Follow Wall: %d, Follow Left: %d \n", followWall, followLeft);
-    // delay(1000);
-    if (followWall) {
-        digitalWrite(LED1, followLeft);
-        digitalWrite(LED2, !followLeft);
-        wallFollower();
-    } else {
-        digitalWrite(LED1, HIGH);
-        digitalWrite(LED2, HIGH);
-        mazeSolver();
-    }
-}
-
-void mspeed(int a, int b) {
-    if (abs(a) <= 255) {
-        digitalWrite(AIN1, a >= 0);
-        digitalWrite(AIN2, a < 0);
-        analogWrite(PWMA, abs(a));
-    }
-
-    if (abs(b) <= 255) {
-        digitalWrite(BIN1, b >= 0);
-        digitalWrite(BIN2, b < 0);
-        analogWrite(PWMB, abs(b));
-    }
-}
+    setupSensors();
+    setup
