@@ -1,5 +1,5 @@
-// jay_ganesha_3.ino
-// Better front thresh, increased to 120 from 110
+// jay_ganesha_2.ino
+// Not working correctly
 #include <Wire.h>
 #include <VL53L1X.h>
 #include <queue>
@@ -58,16 +58,16 @@ void IRAM_ATTR rightEncoderISR() {
 
 int timingBudget = 20; // in mm
 int frontThresh = 50;
-int frontSlowThresh = 110;
+int frontSlowThresh = 90;
 int baseSpeed = 220;
-int rotSpeed = 80; // 130
+int rotSpeed = 80;
 int minSpeed = 80;
-//
+
 const int MAZESIZE = 5;
 int targetX = MAZESIZE - 1, targetY = MAZESIZE - 1;
-const int BLOCKSIZE = 180;
-int blockSize = BLOCKSIZE;
-int rotationAxisCorrection=30;
+const int unitBlock = 18;
+int blockSize = unitBlock;
+const int rotationAxisCorrection= 3;
 
 int maze[MAZESIZE][MAZESIZE];
 int flood[MAZESIZE][MAZESIZE];
@@ -75,9 +75,9 @@ int posX = 0, posY = 0; // Current position in the maze
 int orientation = 2;
 
 // ---------------- PID variables ----------------
-float wallKp = 1.4;   // start small
-float wallKi = 0.0002; // start near zero
-float wallKd = 9;    // start small
+float wallKp = 2.5;   // start small
+float wallKi = 0.02; // start near zero
+float wallKd = 10;    // start small
 
 unsigned long lastMillis = 0;
 
@@ -125,8 +125,9 @@ void updateSensors() {
 }
 
 // --- Main forward movement logic ---
-float cmToEncoderTicks = 1.03; // 10.3
-const float slowRate = 10;
+// float cmToEncoderTicks = 10.3;
+float cmToEncoderTicks = 9.3;
+const float slowRate = 25;
 float encKp=wallKp, encKi=wallKi, encKd=wallKd;
 // --- Global PID states (single set) ---
 float wallError = 0, wallInt = 0, wallPrev = 0;
@@ -136,7 +137,7 @@ void moveForward() {
   if (blockSize <= 0) return;
 
   // compute target ticks (long to avoid overflow)
-  long targetTicks = (long)roundf(cmToEncoderTicks * (float)blockSize) - 2;
+  long targetTicks = (long)roundf(cmToEncoderTicks * (float)blockSize);
   if (targetTicks <= 0) return;
 
   // reset encoders and PID state (ints)
@@ -145,7 +146,7 @@ void moveForward() {
   wallError = wallInt = wallPrev = 0;
   encoderError = encoderInt = encoderPrev = 0;
 
-setdelay();
+    setdelay();
   while (true) {
     int avgTicks = (abs(leftTicks) + abs(rightTicks)) / 2;
     if (avgTicks >= targetTicks) break; // reached goal
@@ -208,17 +209,22 @@ setdelay();
     mspeed(leftSpeed, rightSpeed);
 
     // mdelay(timingBudget); // loop cadence
-    
   } // while
 
-  // // gentle stop
-  blockSize = BLOCKSIZE;
+  if (distFront < frontSlowThresh) {
+    while (distFront > frontThresh) {
+      mspeed(60, 60);
+      mdelay(timingBudget);
+      updateSensors();
+    }
+  }
+
+  // gentle stop
   delay(1);
   mspeed(-60, -60);
   delay(2);
   mspeed(0, 0);
-    Serial.printf("Target was %d, it traveled %d %d \n", targetTicks, leftTicks, rightTicks);
-    
+  blockSize = unitBlock;
 }
 
 
@@ -311,16 +317,11 @@ int nextBlock() {
 }
 
 // ---------------- Rotation with PID ----------------
-// float degreeToEncoderTicks = 0.945;   // calibration factor
-// float degreeToEncoderTicks = 0.85;   // calibration factor
-// float degreeToEncoderTicks = 0.89;   // calibration factor
-float degreeToEncoderTicks = 0.85;   // calibration factor
+// float encoderCountToDegrees = 0.945;   // calibration factor
+float encoderCountToDegrees = 0.85;   // calibration factor
 
-int rotBaseSpeed = 170;                // base rotation speed
-int rotMaxSpeed = 180;                 // clamp for safety
-int rotMinSpeed = 70; // minimum speed during rotation
-int slowDownTicks = 100;
-int rotSlowRate = 7;
+int rotBaseSpeed = 120;                // base rotation speed
+int rotMaxSpeed = 200;                 // clamp for safety
 
 // PID constants (roughly estimated for micromouse 300 rpm motors)
 float rotation_kp = 2.0;     // proportional gain
@@ -328,9 +329,8 @@ float rotation_ki = 0.002;    // integral gain (small, avoids bias drift)
 float rotation_kd = 1.5;     // derivative gain
 
 void rotate(int degree) {
-    if (degree == 0) return;
     if (degree == 180) blockSize -= rotationAxisCorrection;
-    long targetTicks = degreeToEncoderTicks * abs(degree) - 2;
+    long targetTicks = encoderCountToDegrees * abs(degree);
     int dir = (degree > 0) ? 1 : -1;
 
     // Reset encoder counts
@@ -359,27 +359,6 @@ void rotate(int degree) {
         }
         if (!(rotatingLeft || rotatingRight)) break;
 
-        float progress = ((float)(leftAbs + rightAbs) / 2.0f) / (float)targetTicks;
-        progress = constrain(progress, 0.0f, 1.0f);
-        // Serial.printf("L: %d, R: %d, P: %f %f %f \n", leftAbs, rightAbs, progress, (float)(leftAbs + rightAbs) / 2, (float)(leftAbs + rightAbs) / 2 * (float)targetTicks);
-
-        float dynamicSpeed = rotMinSpeed + (rotBaseSpeed - rotMinSpeed) * (1.0f - powf(fabsf(2.0f * progress - 1.0f), rotSlowRate));
-
-        // make sure within bounds
-        dynamicSpeed = constrain(dynamicSpeed, (float)rotMinSpeed, (float)rotMaxSpeed);
-
-        // int remaining = targetTicks - ((leftAbs + rightAbs) / 2);
-        // float dynamicSpeed = rotBaseSpeed;
-
-        // // apply slowdown curve
-        // if (remaining < slowDownTicks) {
-        //     int x = slowDownTicks - remaining; // ticks since slowdown started
-        //     dynamicSpeed = minSpeed + (rotBaseSpeed - minSpeed) * powf(1.0f - ((float)x / slowDownTicks), slowRate);
-        // }
-
-        // // clamp safety
-        // dynamicSpeed = constrain(dynamicSpeed, minSpeed, rotBaseSpeed);
-
         // PID on difference in encoder counts
         error = (leftAbs - rightAbs);         // balance error
         integral += error;
@@ -390,22 +369,19 @@ void rotate(int degree) {
         float correction = rotation_kp * error + rotation_ki * integral + rotation_kd * derivative;
 
         // Apply correction symmetrically
-        int leftSpeed  = dir * (dynamicSpeed - correction);
-        int rightSpeed = -dir * (dynamicSpeed + correction);
+        int leftSpeed  = dir * (rotBaseSpeed - correction);
+        int rightSpeed = -dir * (rotBaseSpeed + correction);
 
         // Constrain speeds
         leftSpeed  = constrain(leftSpeed, -rotMaxSpeed, rotMaxSpeed);
         rightSpeed = constrain(rightSpeed, -rotMaxSpeed, rotMaxSpeed);
 
         mspeed(leftSpeed, rightSpeed);
-        // Serial.printf("Lspeed: %d,\t Rspeed: %d,\t progress: %f, \t Dspeed: %f\n", leftSpeed, rightSpeed, progress, dynamicSpeed);
     }
 
-    delay(1);
-    mspeed(-dir * 80, dir * 80);
-    delay(2);
-
     // Small counter-brake to rotation_kill inertia
+    mspeed(-dir * 80, dir * 80);
+    delay(5);
     mspeed(0, 0);
     Serial.printf("Target was %d, it traveled %d %d \n", targetTicks, leftTicks, rightTicks);
 }
@@ -466,10 +442,6 @@ void behaviorStep() {
             mdelay(timingBudget);
             updateSensors();
         }
-        if (followLeft) mspeed(-80, 80);
-        else mspeed(80, -80);
-        delay(2);
-        mspeed(0, 0);
         return;
     }
 
@@ -582,8 +554,8 @@ void calibrate() {
     targetRightDist /= epoch;
 
     delay(1000);
-    // rotate(45);
-    // rotate(-45);
+    rotate(45);
+    rotate(-45);
 }
 
 void waitButtonPress() {
@@ -594,7 +566,7 @@ void waitButtonPress() {
         }
         else if (digitalRead(BTN2) == HIGH) {
             followWall = false;
-            return;
+            break;
         }
         delay(50);
         digitalWrite(LED1, LOW);
@@ -621,28 +593,11 @@ void waitButtonPress() {
 void setup() {
     Serial.begin(115200);
     // Use custom I2C pins: SDA = 33, SCL = 32
-
-    if (digitalRead(BTN1) == HIGH) {
-        Serial.println("Debugging mode enabled");
-        digitalWrite(LED1, HIGH);
-        delay(100);
-        digitalWrite(LED1, LOW);
-        delay(100);
-        digitalWrite(LED1, HIGH);
-        delay(100);
-        digitalWrite(LED1, LOW);
-        delay(100);
-        
-        debugger();
-        // return;
-    }
-
     setupSensors();
 
     setupMotorEncodersMore();
 
     calibrate();
-
 
     Serial.println("Waiting for button press...");
     waitButtonPress();
@@ -650,12 +605,31 @@ void setup() {
     Serial.println("Starting");
     delay(1000);
 
-    debugger();
-
     // while(1) {
-    //     moveForward();
-    //     mspeed(0,0);
+    //     moveForward(25);
     //     delay(500);
+    // }
+
+    // while (1) {
+    //     // rotate(90);
+    //     // delay(1000);
+    //     // rotate(180);
+    //     // delay(1000);
+    //     // rotate(-90);
+    //     // delay(1000);
+    //     rotate(360);
+    //     delay(3000);
+    // }
+
+    // while (1) {
+    //     if (digitalRead(BTN1) == HIGH) {
+    //     delay(500);
+    //     rotate(90);
+    //     }
+    //     else if (digitalRead(BTN2) == HIGH) {
+    //         delay(500);
+    //         rotate(-180);
+    //     }
     // }
 }
 
@@ -667,32 +641,25 @@ void mazeSolver() {
         int degrees = nextBlock();
         while (degrees == -1) {
             Serial.println("End of the maze");
-            // for (int i = 0; i < 20; i++) {
-            //     digitalWrite(LED1, HIGH);
-            //     digitalWrite(LED2, HIGH);
-            //     delay(50);
-            //     digitalWrite(LED1, LOW);
-            //     digitalWrite(LED2, LOW);
-            //     delay(50);
-            // }
-            // followWall = true;
-            delay(100);
-            // return;
-            if (!optimise_run) {
-                targetX=0;
-                targetY=0;
-                blink(3);
-                return;
-            } else {
-                targetX=MAZESIZE-1;
-                targetY=MAZESIZE-1;
-                while (1) {
-                    if (digitalRead(BTN1) == HIGH) {
-                        delay(500);
-                        return;
-                    }
-                }
+            for (int i = 0; i < 20; i++) {
+                digitalWrite(LED1, HIGH);
+                digitalWrite(LED2, HIGH);
+                delay(50);
+                digitalWrite(LED1, LOW);
+                digitalWrite(LED2, LOW);
+                delay(50);
             }
+            followWall = true;
+            delay(500);
+            return;
+            // if (!optimise_run) {
+            //     targetX=0;
+            //     targetY=0;
+            // } else {
+            //     targetX=MAZESIZE-1;
+            //     targetY=MAZESIZE-1;
+            // }
+            break;
         }
         rotate(degrees);
         delay(100);
@@ -733,37 +700,6 @@ void loop() {
     }
 }
 
-void debugger() {
-
-    while(1) {
-        moveForward();
-        delay(500);
-    }
-    
-    // setupMotorEncodersMore();
-    
-    // while (1) {
-    //     if (digitalRead(BTN1) == HIGH) {
-    //         delay(1000);
-    //         rotate(720);
-    //         delay(100);
-    //     }
-    //     else if (digitalRead(BTN2) == HIGH) {
-    //         delay(1000);
-    //         rotate(-90);
-    //         delay(500);
-    //         rotate(180);
-    //         delay(500);
-    //         rotate(90);
-    //         delay(500);
-    //         rotate(360);
-
-    //     }
-    //     delay(50);
-    // }
-
-}
-
 void mspeed(int a, int b) {
     if (abs(a) <= 255) {
         digitalWrite(AIN1, a >= 0);
@@ -775,16 +711,5 @@ void mspeed(int a, int b) {
         digitalWrite(BIN1, b >= 0);
         digitalWrite(BIN2, b < 0);
         analogWrite(PWMB, abs(b));
-    }
-}
-
-void blink(int n) {
-    for (int i = 0; i < n; i++) {
-        digitalWrite(LED1, HIGH);
-        digitalWrite(LED2, HIGH);
-        delay(100);
-        digitalWrite(LED1, LOW);
-        digitalWrite(LED2, LOW);
-        delay(100);
     }
 }
