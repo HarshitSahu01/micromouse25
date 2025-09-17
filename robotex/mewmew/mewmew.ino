@@ -1,4 +1,4 @@
-// jay_ganesha_2.ino
+// mewmew.ino
 // Not working correctly
 #include <Wire.h>
 #include <VL53L1X.h>
@@ -57,15 +57,15 @@ void IRAM_ATTR rightEncoderISR() {
 }
 
 int timingBudget = 20; // in mm
-int frontThresh = 50;
-int frontSlowThresh = 90;
+int frontThresh = 60;
+int frontSlowThresh = 100;
 int frontWallCorrection = 150;
 int baseSpeed = 220;
 int rotSpeed = 80;
 int minSpeed = 80;
 
 const int MAZESIZE = 5;
-int targetX = MAZESIZE - 1, targetY = MAZESIZE - 1;
+int targetX = MAZESIZE/2, targetY = MAZESIZE/2;
 const int unitBlock = 18;
 int blockSize = unitBlock;
 const int rotationAxisCorrection= 3;
@@ -78,7 +78,7 @@ int orientation = 2;
 // ---------------- PID variables ----------------
 float wallKp = 2.5;   // start small
 float wallKi = 0.02; // start near zero
-float wallKd = 9.8;    // start small
+float wallKd = 10;    // start small
 
 unsigned long lastMillis = 0;
 
@@ -113,8 +113,9 @@ float wf_baseSpeedKi = 0.0002; // Increased for steady-state accuracy
 float wf_Kd = 9;            // Increased for stability
 float wf_pidPrev = 0, wf_pidInt = 0;
 
-float wallWeight = 0.7f;
-float encoderWeight = 0.3f;
+float wallWeight = 0.4f;
+float encoderWeight = 0.2f;
+float yawWeight = 0.4f;
 
 bool followLeft = false;
 bool followWall = false;
@@ -132,7 +133,10 @@ const float slowRate = 25;
 float encKp=wallKp, encKi=wallKi, encKd=wallKd;
 // --- Global PID states (single set) ---
 float wallError = 0, wallInt = 0, wallPrev = 0;
-float encoderError = 0, encoderInt = 0, encoderPrev = 0;       
+float encoderError = 0, encoderInt = 0, encoderPrev = 0;  
+float yawError = 0, yawInt = 0, yawPrev = 0, yawTarget=90;
+
+extern volatile bool GYRO_CALIBRATED;
 
 void moveForward() {
   if (blockSize <= 0) return;
@@ -146,6 +150,8 @@ void moveForward() {
   rightTicks = 0;
   wallError = wallInt = wallPrev = 0;
   encoderError = encoderInt = encoderPrev = 0;
+  yawError = yawInt = yawPrev = 0;
+  setYaw(90);
   bool correctedFront = false; 
 
     setdelay();
@@ -165,7 +171,7 @@ void moveForward() {
     // --- sensor update & emergency stop ---
     updateSensors();
     if (distFront < frontThresh) break;
-    if (distFront < frontSlowThresh) dynamicSpeed = 80;
+    if (distFront < frontSlowThresh) dynamicSpeed = 70;
     if (distFront < frontWallCorrection and not correctedFront) {
       targetTicks += (long)roundf(cmToEncoderTicks * (float)(distFront - frontThresh)) - (targetTicks - avgTicks);
       correctedFront = true;
@@ -198,8 +204,15 @@ void moveForward() {
     encoderPrev = encoderError;
     int encoderPIDValue = encKp * encoderError + encKi * encoderInt + encKd * encDeriv;
 
+    yawError = readYaw() - yawTarget;
+    yawInt += yawError;
+    yawInt = constrain(yawInt, -100000, 100000);
+    int yawDeriv = yawError - yawPrev;
+    yawPrev = yawError;
+    int yawPIDValue = wallKp * yawError + wallKi * yawInt + wallKd * yawDeriv;
+
     // --- Merge corrections (float totalCorrection) ---
-    int totalCorrection = encoderWeight * encoderPIDValue + wallWeight * wallPIDValue;
+    int totalCorrection = encoderWeight * encoderPIDValue + wallWeight * wallPIDValue + yawWeight * yawPIDValue;
 
     // Debug print: two ints, two ints, then two floats
     // Serial.printf("%d %d\t %d %d\t %d\t %f %f\n",
@@ -324,7 +337,7 @@ int nextBlock() {
 
 // ---------------- Rotation with PID ----------------
 // float encoderCountToDegrees = 0.945;   // calibration factor
-float encoderCountToDegrees = 0.85;   // calibration factor
+float encoderCountToDegrees = 0.89;  //0.85   // calibration factor
 
 int rotBaseSpeed = 120;                // base rotation speed
 int rotMaxSpeed = 200;                 // clamp for safety
@@ -558,10 +571,6 @@ void calibrate() {
     }
     targetLeftDist /= epoch;
     targetRightDist /= epoch;
-
-    delay(1000);
-    rotate(45);
-    rotate(-45);
 }
 
 void waitButtonPress() {
@@ -599,11 +608,16 @@ void waitButtonPress() {
 void setup() {
     Serial.begin(115200);
     // Use custom I2C pins: SDA = 33, SCL = 32
+
+    gyroInit();
+
     setupSensors();
 
     setupMotorEncodersMore();
 
     calibrate();
+
+    while(not GYRO_CALIBRATED) {delay(50);}
 
     Serial.println("Waiting for button press...");
     waitButtonPress();
@@ -611,32 +625,7 @@ void setup() {
     Serial.println("Starting");
     delay(1000);
 
-    // while(1) {
-    //     moveForward(25);
-    //     delay(500);
-    // }
-
-    // while (1) {
-    //     // rotate(90);
-    //     // delay(1000);
-    //     // rotate(180);
-    //     // delay(1000);
-    //     // rotate(-90);
-    //     // delay(1000);
-    //     rotate(360);
-    //     delay(3000);
-    // }
-
-    // while (1) {
-    //     if (digitalRead(BTN1) == HIGH) {
-    //     delay(500);
-    //     rotate(90);
-    //     }
-    //     else if (digitalRead(BTN2) == HIGH) {
-    //         delay(500);
-    //         rotate(-180);
-    //     }
-    // }
+    // debugger();
 }
 
 int optimise_run = false;
@@ -647,6 +636,8 @@ void mazeSolver() {
         int degrees = nextBlock();
         while (degrees == -1) {
             Serial.println("End of the maze");
+            rotate(180);
+            orientation = (orientation + 2) % 4;
             for (int i = 0; i < 20; i++) {
                 digitalWrite(LED1, HIGH);
                 digitalWrite(LED2, HIGH);
@@ -655,16 +646,16 @@ void mazeSolver() {
                 digitalWrite(LED2, LOW);
                 delay(50);
             }
-            followWall = true;
+            // followWall = true;
             delay(500);
-            return;
-            // if (!optimise_run) {
-            //     targetX=0;
-            //     targetY=0;
-            // } else {
-            //     targetX=MAZESIZE-1;
-            //     targetY=MAZESIZE-1;
-            // }
+            // return;
+            if (!optimise_run) {
+                targetX=0;
+                targetY=0;
+            } else {
+                targetX=MAZESIZE-1;
+                targetY=MAZESIZE-1;
+            }
             break;
         }
         rotate(degrees);
@@ -703,6 +694,13 @@ void loop() {
         digitalWrite(LED1, HIGH);
         digitalWrite(LED2, HIGH);
         mazeSolver();
+    }
+}
+
+void debugger() {
+    while(1) {
+        Serial.println(readYaw());
+        delay(500);
     }
 }
 
