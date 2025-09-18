@@ -65,7 +65,7 @@ int rotSpeed = 80;
 int minSpeed = 80;
 
 const int MAZESIZE = 5;
-int targetX = MAZESIZE - 1, targetY = MAZESIZE - 1;
+int targetX = MAZESIZE/2, targetY = MAZESIZE/2;
 const int unitBlock = 18;
 int blockSize = unitBlock;
 const int rotationAxisCorrection= 3;
@@ -337,99 +337,84 @@ int nextBlock() {
 
 // ---------------- Rotation with PID ----------------
 // float encoderCountToDegrees = 0.945;   // calibration factor
-float encoderCountToDegrees = 0.85;   // calibration factor
+// float encoderCountToDegrees = 0.85;  //0.85   // calibration factor
 
 int rotBaseSpeed = 120;                // base rotation speed
 int rotMaxSpeed = 200;                 // clamp for safety
-int rotMinSpeed = 70;
-float rotSlowRate = 10.0;
 
 // PID constants (roughly estimated for micromouse 300 rpm motors)
-float rotation_kp = 2.0;     // proportional gain
+float rotation_kp = 2.4;     // proportional gain
 float rotation_ki = 0.002;    // integral gain (small, avoids bias drift)
 float rotation_kd = 1.5;     // derivative gain
 
+float encoderCountToDegrees = 0.80;  //0.85   // calibration factor
+float encoderCountToDegrees180 = 0.84;  //0.85   // calibration factor    // derivative gain
+
 void rotate(int degree) {
-  float targetYaw = 0;
-  int dir = 0; // 1 for left turn (increasing angle), -1 for right turn (decreasing angle)
+    long targetTicks;
+    if (degree == 180) {
+        blockSize -= rotationAxisCorrection;
+        targetTicks = encoderCountToDegrees180 * abs(degree);
+    }
+    else{
+        targetTicks = encoderCountToDegrees * abs(degree);
+    }
+    int dir = (degree > 0) ? 1 : -1;
 
-  // --- 1. Configure Turn based on Degree ---
-  if (degree == 90) {
-    setYaw360(90); // Current direction is now 90 degrees
-    targetYaw = 180; // Target is a 90-degree left turn
-    dir = 1;
-  } else if (degree == -90) {
-    setYaw360(90); // Current direction is now 90 degrees
-    targetYaw = 0;   // Target is a 90-degree right turn
-    dir = -1;
-  } else if (degree == 180) {
-    setYaw360(0);  // Current direction is now 0 degrees
-    targetYaw = 180; // Target is a 180-degree left turn
-    dir = 1;
-  } else {
-    return; // Invalid angle
-  }
+    // Reset encoder counts
+    noInterrupts();
+    leftTicks = 0;
+    rightTicks = 0;
+    interrupts();
 
-  Serial.printf("Rotate360: Target %.1f deg, Dir: %d\n", targetYaw, dir);
+    //setYaw();
 
-  // --- 2. Reset Encoder and PID States ---
-  noInterrupts();
-  leftTicks = 0;
-  rightTicks = 0;
-  interrupts();
-  
-  float encError = 0, encPrev = 0, encInt = 0;
-  unsigned long startTime = millis();
-  const unsigned long timeout = 3000;
+    // Reset PID state
+    float error = 0, prevError = 0, integral = 0;
+    bool rotatingLeft = true, rotatingRight = true;
 
-  // --- 3. Main Hybrid Control Loop ---
-  while (millis() - startTime < timeout) {
-    float currentYaw = readYaw360();
+    while (rotatingLeft || rotatingRight) {
+        // Compute progress of each wheel
+        long leftAbs = abs(leftTicks);
+        long rightAbs = abs(rightTicks);
 
-    // --- GYRO: New break condition ---
-    if (dir == 1 && currentYaw >= targetYaw - 1.0) { // For left turns
-      break;
-    } else if (dir == -1 && currentYaw <= targetYaw + 1.0) { // For right turns
-      break;
+        //Stop each motor independently when its target reached
+        if (leftAbs >= targetTicks) {
+            mspeed(-40, 300);
+            rotatingLeft = false;
+        }
+        if (rightAbs >= targetTicks) {
+            mspeed(300, -40);
+            rotatingRight = false;
+        }
+        if (!(rotatingLeft || rotatingRight)) break;
+
+        // PID on difference in encoder counts
+        error = (leftAbs - rightAbs);         // balance error
+        integral += error;
+        integral = constrain(integral, -500, 500);  // anti-windup
+        float derivative = error - prevError;
+        prevError = error;
+
+        float correction = rotation_kp * error + rotation_ki * integral + rotation_kd * derivative;
+
+        // Apply correction symmetrically
+        int leftSpeed  = dir * (rotBaseSpeed - correction);
+        int rightSpeed = -dir * (rotBaseSpeed + correction);
+
+        // Constrain speeds
+        leftSpeed  = constrain(leftSpeed, -rotMaxSpeed, rotMaxSpeed);
+        rightSpeed = constrain(rightSpeed, -rotMaxSpeed, rotMaxSpeed);
+
+        mspeed(leftSpeed, rightSpeed);
     }
 
-    // --- GYRO: Calculate error with 0-360 wrapping ---
-    float yawError = targetYaw - currentYaw;
-    if (dir == 1 && yawError < -180) yawError += 360; // Handle wrap for left turns (e.g., target 10, current 350)
-    if (dir == -1 && yawError > 180) yawError -= 360; // Handle wrap for right turns (e.g., target 350, current 10)
-
-    // --- GYRO: Calculate progress (0.0 to 1.0) for dynamic speed ---
-    float totalAngleToTurn = 90; // Works for 90 and -90
-    if (abs(degree) == 180) totalAngleToTurn = 180;
-    float progress = 1.0 - (abs(yawError) / totalAngleToTurn);
-    progress = constrain(progress, 0.0, 1.0);
-    
-    // --- GYRO: Calculate dynamic speed based on progress ---
-    float dynamicSpeed = (float)rotBaseSpeed - powf(progress, slowRate) * ((float)rotBaseSpeed - (float)rotMinSpeed);
-
-    // --- ENCODERS: Inner PID loop to keep the turn symmetrical ---
-    encError = abs(leftTicks) - abs(rightTicks);
-    encInt = constrain(encInt + encError, -500, 500);
-    float encDeriv = encError - encPrev;
-    encPrev = encError;
-    float correction = (rotation_kp * encError) + (rotation_ki * encInt) + (rotation_kd * encDeriv);
-
-    // --- Apply motor speeds ---
-    int leftSpeed  = -dir * (dynamicSpeed - correction);
-    int rightSpeed =  dir * (dynamicSpeed + correction);
-    mspeed(leftSpeed, rightSpeed);
-    
+    // Small counter-brake to rotation_kill inertia
+    mspeed(-dir * 80, dir * 80);
     delay(5);
-  }
-
-  // --- 4. Brake and Stop ---
-  mspeed(dir * 80, -dir * 80);
-  delay(15);
-  mspeed(0, 0);
-
-  Serial.printf("Rotation complete. Final angle: %.2f\n", readYaw360());
+    mspeed(0, 0);
+    Serial.printf("Target was %d, it traveled %d %d \n", targetTicks, leftTicks, rightTicks);
 }
-
 
 
 // ---------------- PID routines ----------------
@@ -499,8 +484,6 @@ void behaviorStep() {
 }
 
 void setupSensors() {
-    Wire.begin(33, 32);
-    Wire.setClock(400000);
 
     // --- Step 1: Reset all sensors ---
     pinMode(XSHUT1, OUTPUT);
@@ -635,6 +618,11 @@ void setup() {
     Serial.begin(115200);
     // Use custom I2C pins: SDA = 33, SCL = 32
 
+    Wire.begin(33, 32);
+    Wire.setClock(400000);
+
+    // debugger();
+
     gyroInit();
 
     setupSensors();
@@ -663,6 +651,7 @@ void mazeSolver() {
         while (degrees == -1) {
             Serial.println("End of the maze");
             rotate(180);
+            orientation = (orientation + 2) % 4;
             for (int i = 0; i < 20; i++) {
                 digitalWrite(LED1, HIGH);
                 digitalWrite(LED2, HIGH);
@@ -673,6 +662,7 @@ void mazeSolver() {
             }
             // followWall = true;
             delay(500);
+            // return;
             if (!optimise_run) {
                 targetX=0;
                 targetY=0;
@@ -680,7 +670,7 @@ void mazeSolver() {
                 targetX=MAZESIZE-1;
                 targetY=MAZESIZE-1;
             }
-            return;
+            break;
         }
         rotate(degrees);
         delay(100);
@@ -722,9 +712,14 @@ void loop() {
 }
 
 void debugger() {
+    gyroInit();
+    while(not GYRO_CALIBRATED) {
+        delay(50);
+    }
+    Serial.println("Gyro calibrated, starting debugger...");
     while(1) {
-        Serial.println(readYaw());
-        delay(500);
+        delay(100);
+        Serial.printf("Yaw: %f \n", readYaw());
     }
 }
 

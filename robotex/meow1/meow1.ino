@@ -349,7 +349,8 @@ float rotation_kd = 1.5;     // derivative gain
 
 void rotate(int degree) {
     if (degree == 180) blockSize -= rotationAxisCorrection;
-    long targetTicks = encoderCountToDegrees * abs(degree);
+    // long targetTicks = encoderCountToDegrees * abs(degree);
+    float targetYaw, yaw;
     int dir = (degree > 0) ? 1 : -1;
 
     // Reset encoder counts
@@ -357,6 +358,22 @@ void rotate(int degree) {
     leftTicks = 0;
     rightTicks = 0;
     interrupts();
+
+    if (degree == 90) {
+        setYaw(0);
+        targetYaw = 90.0f;
+    } else if (degree == -90) {
+        setYaw(0);
+        targetYaw = 270.0f;
+    } else if (degree == 180) {
+        setYaw(90);
+        targetYaw = 90.0f;
+    }
+
+    while (1) {
+        delay(200);
+        Serial.printf("%f %f \n", targetYaw, readYaw() + 180.0f);
+    }
 
     // Reset PID state
     float error = 0, prevError = 0, integral = 0;
@@ -367,16 +384,23 @@ void rotate(int degree) {
         long leftAbs = abs(leftTicks);
         long rightAbs = abs(rightTicks);
 
+        yaw = readYaw() + 180.0f;
+
+        if ((dir and yaw - targetYaw < 2) or (not dir and targetYaw - yaw < 2)) break;
+        else if ((dir and yaw - targetYaw < 10) or (not dir and targetYaw - yaw < 10)) rotBaseSpeed = 70;
+
+        Serial.printf("mew: %f %f \n", targetYaw, yaw);
+        
         // Stop each motor independently when its target reached
-        if (leftAbs >= targetTicks) {
-            mspeed(-40, 300);
-            rotatingLeft = false;
-        }
-        if (rightAbs >= targetTicks) {
-            mspeed(300, -40);
-            rotatingRight = false;
-        }
-        if (!(rotatingLeft || rotatingRight)) break;
+        // if (leftAbs >= targetTicks) {
+        //     mspeed(-40, 300);
+        //     rotatingLeft = false;
+        // }
+        // if (rightAbs >= targetTicks) {
+        //     mspeed(300, -40);
+        //     rotatingRight = false;
+        // }
+        // if (!(rotatingLeft || rotatingRight)) break;
 
         // PID on difference in encoder counts
         error = (leftAbs - rightAbs);         // balance error
@@ -396,13 +420,16 @@ void rotate(int degree) {
         rightSpeed = constrain(rightSpeed, -rotMaxSpeed, rotMaxSpeed);
 
         mspeed(leftSpeed, rightSpeed);
+        // delay(5);
     }
+
+    rotBaseSpeed = 120;
 
     // Small counter-brake to rotation_kill inertia
     mspeed(-dir * 80, dir * 80);
     delay(5);
     mspeed(0, 0);
-    Serial.printf("Target was %d, it traveled %d %d \n", targetTicks, leftTicks, rightTicks);
+    Serial.printf("Target was %d, it traveled %d \n", targetYaw, readYaw());
 }
 
 
@@ -610,7 +637,6 @@ void setup() {
     Wire.begin(33, 32);
     Wire.setClock(400000);
 
-    // debugger();
 
     gyroInit();
 
@@ -622,6 +648,7 @@ void setup() {
 
     while(not GYRO_CALIBRATED) {delay(50);}
 
+    debugger();
     Serial.println("Waiting for button press...");
     waitButtonPress();
 
@@ -701,15 +728,28 @@ void loop() {
 }
 
 void debugger() {
-    gyroInit();
-    while(not GYRO_CALIBRATED) {
+    while (1) {
+        if (digitalRead(BTN1) == HIGH) {
+            delay(500);
+            rotate(-90);
+            delay(500);
+            delay(180);
+        } else if (digitalRead(BTN2) == HIGH) {
+            delay(500);
+            rotate(90);
+            delay(500);
+        }
         delay(50);
     }
-    Serial.println("Gyro calibrated, starting debugger...");
-    while(1) {
-        delay(100);
-        Serial.printf("Yaw: %f \n", readYaw());
-    }
+    // gyroInit();
+    // while(not GYRO_CALIBRATED) {
+    //     delay(50);
+    // }
+    // Serial.println("Gyro calibrated, starting debugger...");
+    // while(1) {
+    //     delay(100);
+    //     Serial.printf("Yaw: %f \n", readYaw());
+    // }
 }
 
 void mspeed(int a, int b) {

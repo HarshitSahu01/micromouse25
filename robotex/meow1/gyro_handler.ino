@@ -1,3 +1,4 @@
+// gyro_handler.ino
 // Required libraries for MPU6050 and I2C communication
 #include "I2Cdev.h"
 #include "MPU6050_6Axis_MotionApps20.h"
@@ -131,31 +132,4 @@ float readYaw() {
   while (adjustedYaw < -180.0) adjustedYaw += 360.0;
   
   return adjustedYaw;
-}
-
-// ADD THIS TO gyro_handler.ino
-
-// ================================================================
-// ===                   YAW ACCESSOR (0-360)                   ===
-// ================================================================
-// Returns the yaw in a 0-360 degree range
-float readYaw360() {
-  float yaw = readYaw(); // Gets the original yaw from -180 to 180
-  if (yaw < 0) {
-    yaw += 360; // Convert negative values to the 180-360 range
-  }
-  return yaw;
-}
-
-// ================================================================
-// ===                     YAW SET (0-360)                      ===
-// ================================================================
-// Sets the current orientation using a 0-360 degree value
-void setYaw360(float targetAngle) {
-  // Convert the 0-360 target back to the -180 to 180 range
-  // that the underlying setYaw function expects.
-  if (targetAngle > 180) {
-    targetAngle -= 360;
-  }
-  setYaw(targetAngle);
 }

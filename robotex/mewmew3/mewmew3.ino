@@ -80,6 +80,11 @@ float wallKp = 2.5;   // start small
 float wallKi = 0.02; // start near zero
 float wallKd = 10;    // start small
 
+// Add these new global constants for the gyro rotation PID
+float yaw_kp = 3.0;
+float yaw_ki = 0.02;
+float yaw_kd = 2.5;
+
 unsigned long lastMillis = 0;
 
 void setdelay() {
@@ -114,7 +119,7 @@ float wf_Kd = 9;            // Increased for stability
 float wf_pidPrev = 0, wf_pidInt = 0;
 
 float wallWeight = 0.4f;
-float encoderWeight = 0.2f;
+float encoderWeight = 0.3f;
 float yawWeight = 0.4f;
 
 bool followLeft = false;
@@ -348,61 +353,76 @@ float rotation_ki = 0.002;    // integral gain (small, avoids bias drift)
 float rotation_kd = 1.5;     // derivative gain
 
 void rotate(int degree) {
-    if (degree == 180) blockSize -= rotationAxisCorrection;
+    if (degree == 0) return; // No rotation needed
+    if (abs(degree) == 180) blockSize -= rotationAxisCorrection;
+
+    // 1. Set up targets for both encoders and the gyro
     long targetTicks = encoderCountToDegrees * abs(degree);
     int dir = (degree > 0) ? 1 : -1;
 
-    // Reset encoder counts
+    float startYaw = readYaw();
+    float targetYaw = startYaw + degree;
+
+    // Normalize targetYaw to be within -180 to +180
+    while (targetYaw > 180.0f) targetYaw -= 360.0f;
+    while (targetYaw < -180.0f) targetYaw += 360.0f;
+
+    // Reset encoders safely
     noInterrupts();
     leftTicks = 0;
     rightTicks = 0;
     interrupts();
 
-    // Reset PID state
-    float error = 0, prevError = 0, integral = 0;
-    bool rotatingLeft = true, rotatingRight = true;
+    // Reset PID state variables
+    float yawError = 0, yawPrevError = 0, yawIntegral = 0;
+    float encError = 0, encPrevError = 0, encIntegral = 0;
 
-    while (rotatingLeft || rotatingRight) {
-        // Compute progress of each wheel
-        long leftAbs = abs(leftTicks);
-        long rightAbs = abs(rightTicks);
+    // 2. Main loop runs until the encoder target is met
+    while ((abs(leftTicks) + abs(rightTicks)) / 2 < targetTicks) {
 
-        // Stop each motor independently when its target reached
-        if (leftAbs >= targetTicks) {
-            mspeed(-40, 300);
-            rotatingLeft = false;
-        }
-        if (rightAbs >= targetTicks) {
-            mspeed(300, -40);
-            rotatingRight = false;
-        }
-        if (!(rotatingLeft || rotatingRight)) break;
+        // --- 3. Calculate Gyro PID for angular accuracy ---
+        float currentYaw = readYaw();
+        
+        // Calculate the shortest angle difference to handle wrapping (-180/180)
+        yawError = targetYaw - currentYaw;
+        if (yawError > 180.0f) yawError -= 360.0f;
+        if (yawError < -180.0f) yawError += 360.0f;
 
-        // PID on difference in encoder counts
-        error = (leftAbs - rightAbs);         // balance error
-        integral += error;
-        integral = constrain(integral, -500, 500);  // anti-windup
-        float derivative = error - prevError;
-        prevError = error;
+        yawIntegral += yawError;
+        yawIntegral = constrain(yawIntegral, -3000, 3000); // Anti-windup
+        float yawDerivative = yawError - yawPrevError;
+        yawPrevError = yawError;
 
-        float correction = rotation_kp * error + rotation_ki * integral + rotation_kd * derivative;
+        float yawCorrection = yaw_kp * yawError + yaw_ki * yawIntegral + yaw_kd * yawDerivative;
 
-        // Apply correction symmetrically
-        int leftSpeed  = dir * (rotBaseSpeed - correction);
-        int rightSpeed = -dir * (rotBaseSpeed + correction);
+        // --- 4. Calculate Encoder Balance PID for tight turns (optional but recommended) ---
+        encError = abs(leftTicks) - abs(rightTicks);
+        encIntegral += encError;
+        encIntegral = constrain(encIntegral, -500, 500);
+        float encDerivative = encError - encPrevError;
+        encPrevError = encError;
 
-        // Constrain speeds
+        // Use the existing rotation_kp constants for this part
+        float encBalanceCorrection = rotation_kp * encError + rotation_ki * encIntegral + rotation_kd * encDerivative;
+
+        // --- 5. Combine corrections and apply to motors ---
+        float totalCorrection = yawCorrection + encBalanceCorrection;
+
+        int leftSpeed  = dir * (rotBaseSpeed - totalCorrection);
+        int rightSpeed = -dir * (rotBaseSpeed + totalCorrection);
+
         leftSpeed  = constrain(leftSpeed, -rotMaxSpeed, rotMaxSpeed);
         rightSpeed = constrain(rightSpeed, -rotMaxSpeed, rotMaxSpeed);
 
         mspeed(leftSpeed, rightSpeed);
+        delay(2); // Small delay for stability
     }
 
-    // Small counter-brake to rotation_kill inertia
+    // Small counter-brake to kill inertia and prevent overshoot
     mspeed(-dir * 80, dir * 80);
-    delay(5);
+    delay(10);
     mspeed(0, 0);
-    Serial.printf("Target was %d, it traveled %d %d \n", targetTicks, leftTicks, rightTicks);
+    Serial.printf("Target Yaw: %.2f, Final Yaw: %.2f\n", targetYaw, readYaw());
 }
 
 
