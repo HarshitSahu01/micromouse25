@@ -60,7 +60,7 @@ int baseSpeed = 220;
 int rotSpeed = 80;
 int minSpeed = 80;
 
-const int MAZESIZE = 5;
+const int MAZESIZE = 16;
 int targetX = MAZESIZE/2, targetY = MAZESIZE/2;
 const int unitBlock = 18;
 int blockSize = unitBlock;
@@ -97,7 +97,7 @@ int targetLeftDist = 54, targetRightDist = 54;
 const int wf_clearanceThresh = 130;
 const int wf_baseSpeed = 255;     // Further reduced for better control
 const int wf_targetDist = 50;     // mm desired wall distance
-const int wf_frontThresh = 100;   // Reduced threshold for earlier detection
+const int wf_frontThresh = 120;   // Reduced threshold for earlier detection
 const int wf_wallThresh = 80;    // Increased for better wall detection
 const int wf_outerSpeed = 250;    //255 Reduced for smoother turns
 const int wf_innerSpeed = 70;     //80 Increased minimum for better movement
