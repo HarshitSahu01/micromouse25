@@ -1,65 +1,44 @@
-#include "Wire.h"
-#include "I2Cdev.h"
-#include "MPU6050.h"
+// Define the pins for the encoder you want to test
+#define ENCODER_A_PIN 22
+#define ENCODER_B_PIN 23
 
-MPU6050 mpu;
+// This variable stores the encoder's position.
+// 'volatile' is crucial because it's changed by an interrupt.
+volatile long encoderTicks = 0;
 
-// Variables to hold average sensor readings
-long accelX_sum = 0, accelY_sum = 0, accelZ_sum = 0;
-long gyroX_sum = 0, gyroY_sum = 0, gyroZ_sum = 0;
+// This is the Interrupt Service Routine (ISR).
+// It's a special function that runs instantly when the interrupt pin changes state.
+// On ESP32, 'IRAM_ATTR' makes the ISR run faster.
+void IRAM_ATTR readEncoder() {
+  // Check the B pin to determine the direction of rotation.
+  if (digitalRead(ENCODER_A_PIN) == LOW) {
+    // If B is LOW, the encoder is turning one way (e.g., clockwise)
+    encoderTicks++;
+  } else {
+    // If B is HIGH, it's turning the other way (e.g., counter-clockwise)
+    encoderTicks--;
+  }
+}
 
 void setup() {
+  // Start serial communication to print the results
   Serial.begin(115200);
-  Wire.begin(33, 32);
-  mpu.initialize();
 
-  // Verify connection
-  if (!mpu.testConnection()) {
-    Serial.println("MPU6050 connection failed!");
-    while (1);
-  }
-  delay(1000);
-  Serial.println("Calibrating... Please wait.");
-  
-  // Take a large number of readings to average out noise
-  int num_readings = 2000;
-  for (int i = 0; i < num_readings; i++) {
-    int16_t ax, ay, az, gx, gy, gz;
-    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-    accelX_sum += ax;
-    accelY_sum += ay;
-    accelZ_sum += az;
-    gyroX_sum += gx;
-    gyroY_sum += gy;
-    gyroZ_sum += gz;
-    delay(2); // Small delay between readings
-  }
+  // Set the encoder pins as inputs with internal pull-up resistors.
+  // This means you don't need external resistors if your encoder is open-collector.
+  pinMode(ENCODER_A_PIN, INPUT_PULLUP);
+  pinMode(ENCODER_B_PIN, INPUT_PULLUP);
 
-  // Calculate the average readings
-  int16_t accelX_offset = accelX_sum / num_readings;
-  int16_t accelY_offset = accelY_sum / num_readings;
-  int16_t accelZ_offset = accelZ_sum / num_readings;
-  int16_t gyroX_offset = gyroX_sum / num_readings;
-  int16_t gyroY_offset = gyroY_sum / num_readings;
-  int16_t gyroZ_offset = gyroZ_sum / num_readings;
+  // Attach the interrupt to the A pin.
+  // It will call the 'readEncoder' function every time the pin goes from LOW to HIGH (RISING).
+  attachInterrupt(digitalPinToInterrupt(ENCODER_B_PIN), readEncoder, RISING);
 
-  // The Z accelerometer reading should be 1G (16384), so we need to adjust for that
-  // This is a simplified approach. For perfect calibration, the sensor would be oriented on all 6 axes.
-  accelZ_offset = accelZ_offset - 16384;
-
-  // Print the results in a copy-paste format
-  Serial.println("\nCalibration complete!");
-  Serial.println("Paste the following lines into your gyroTask() function:");
-  Serial.println("-----------------------------------------------------");
-  Serial.print("mpu.setXAccelOffset("); Serial.print(accelX_offset); Serial.println(");");
-  Serial.print("mpu.setYAccelOffset("); Serial.print(accelY_offset); Serial.println(");");
-  Serial.print("mpu.setZAccelOffset("); Serial.print(accelZ_offset); Serial.println(");");
-  Serial.print("mpu.setXGyroOffset("); Serial.print(gyroX_offset); Serial.println(");");
-  Serial.print("mpu.setYGyroOffset("); Serial.print(gyroY_offset); Serial.println(");");
-  Serial.print("mpu.setZGyroOffset("); Serial.print(gyroZ_offset); Serial.println(");");
-  Serial.println("-----------------------------------------------------");
+  Serial.println("Encoder test started. Turn the encoder...");
 }
 
 void loop() {
-  // Nothing to do here
+  // Print the current encoder tick count every 200 milliseconds.
+  Serial.print("Encoder Ticks: ");
+  Serial.println(encoderTicks);
+  delay(200);
 }

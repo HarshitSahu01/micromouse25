@@ -45,15 +45,11 @@ VL53L1X sensor2;
 VL53L1X sensor3;
 
 void IRAM_ATTR leftEncoderISR() {
-    bool a = digitalRead(LEFT_ENC_A);
-    bool b = digitalRead(LEFT_ENC_B);
-    leftTicks += (a == b) ? 1 : -1;
+    leftTicks++;
 }
 
 void IRAM_ATTR rightEncoderISR() {
-    bool a = digitalRead(RIGHT_ENC_A);
-    bool b = digitalRead(RIGHT_ENC_B);
-    rightTicks += (a == b) ? 1 : -1;
+    rightTicks++;
 }
 
 int timingBudget = 20; // in mm
@@ -101,10 +97,10 @@ int targetLeftDist = 54, targetRightDist = 54;
 const int wf_clearanceThresh = 130;
 const int wf_baseSpeed = 255;     // Further reduced for better control
 const int wf_targetDist = 50;     // mm desired wall distance
-const int wf_frontThresh = 140;   // Reduced threshold for earlier detection
-const int wf_wallThresh = 100;    // Increased for better wall detection
-const int wf_outerSpeed = 245;    //255 Reduced for smoother turns
-const int wf_innerSpeed = 80;     //80 Increased minimum for better movement
+const int wf_frontThresh = 100;   // Reduced threshold for earlier detection
+const int wf_wallThresh = 80;    // Increased for better wall detection
+const int wf_outerSpeed = 250;    //255 Reduced for smoother turns
+const int wf_innerSpeed = 70;     //80 Increased minimum for better movement
 const int wf_rotationSpeed = 150; //200  // Further reduced for better accuracy
 
 // ---------------- Wall PID ----------------
@@ -128,7 +124,7 @@ void updateSensors() {
 
 // --- Main forward movement logic ---
 // float cmToEncoderTicks = 10.3;
-float cmToEncoderTicks = 9.3;
+float cmToEncoderTicks = 10.3;
 const float slowRate = 12;
 float encKp=wallKp, encKi=wallKi, encKd=wallKd;
 // --- Global PID states (single set) ---
@@ -137,7 +133,7 @@ float encoderError = 0, encoderInt = 0, encoderPrev = 0;
 float yawError = 0, yawInt = 0, yawPrev = 0, yawTarget=90;
 
 extern volatile bool GYRO_CALIBRATED;
-float encoderCorrection = 1.04;
+//float encoderCorrection = 1.04;...prayas
 
 void moveForward() {
   if (blockSize <= 0) return;
@@ -157,7 +153,7 @@ void moveForward() {
 
     setdelay();
   while (true) {
-    int avgTicks = (abs(leftTicks) + abs(rightTicks*encoderCorrection)) / 2;
+    int avgTicks = (abs(leftTicks) + abs(rightTicks)) / 2;
     if (avgTicks >= targetTicks) break; // reached goal
 
     // --- progress & dynamicSpeed (floats) ---
@@ -198,7 +194,7 @@ void moveForward() {
     int wallPIDValue = wallKp * wallError + wallKi * wallInt + wallKd * wallDeriv;
 
     // --- Encoder PID (int math) ---
-    encoderError = leftTicks - rightTicks*encoderCorrection;
+    encoderError = leftTicks - rightTicks;
     encoderInt += encoderError;
     encoderInt = constrain(encoderInt, -100000, 100000);
     int encDeriv = encoderError - encoderPrev;
@@ -339,7 +335,7 @@ int nextBlock() {
 
 // ---------------- Rotation with PID ----------------
 // float encoderCountToDegrees = 0.945;   // calibration factor
-// float encoderCountToDegrees = 0.85;  //0.85   // calibration factor
+float encoderCountToDegrees = 0.89;  //0.85   // calibration factor
 
 int rotBaseSpeed = 120;                // base rotation speed
 int rotMaxSpeed = 200;                 // clamp for safety
@@ -349,14 +345,17 @@ float rotation_kp = 2.4;     // proportional gain
 float rotation_ki = 0.002;    // integral gain (small, avoids bias drift)
 float rotation_kd = 1.5;     // derivative gain
 
-float encoderCountToDegrees = 0.80;  //0.85   // calibration factor
-float encoderCountToDegrees180 = 0.84;  //0.85   // calibration factor    // derivative gain
+// float encoderCountToDegrees = 0.80;  //0.85   // calibration factor
+// float encoderCountToDegrees180 = 0.84;  //0.85   // calibration factor    // derivative gain
 
 void rotate(int degree) {
     long targetTicks;
+    if (degree == 0) return;
+    // encoderCountToDegrees = degree > 0 ? 0.9 : 0.85;
+    encoderCountToDegrees = 0.9;
     if (degree == 180) {
         blockSize -= rotationAxisCorrection;
-        targetTicks = encoderCountToDegrees180 * abs(degree);
+        targetTicks = encoderCountToDegrees * abs(degree);
     }
     else{
         targetTicks = encoderCountToDegrees * abs(degree);
@@ -562,7 +561,7 @@ void setupMotorEncodersMore() {
     pinMode(RIGHT_ENC_A, INPUT_PULLUP);
     pinMode(RIGHT_ENC_B, INPUT_PULLUP);
 
-    attachInterrupt(digitalPinToInterrupt(LEFT_ENC_A), leftEncoderISR, RISING);
+    attachInterrupt(digitalPinToInterrupt(LEFT_ENC_B), leftEncoderISR, RISING);
     attachInterrupt(digitalPinToInterrupt(RIGHT_ENC_A), rightEncoderISR, RISING);
     Serial.println("Motor Encoders initialised");
 
@@ -638,13 +637,11 @@ void setup() {
 
     // while(not GYRO_CALIBRATED) {delay(50);}
 
-    debugger();
     Serial.println("Waiting for button press...");
     waitButtonPress();
 
     Serial.println("Starting");
     delay(1000);
-
     // debugger();
 }
 
@@ -664,16 +661,16 @@ void mazeSolver() {
                 digitalWrite(LED2, LOW);
                 delay(50);
             }
-            // followWall = true;
+            followWall = true;
             delay(500);
-            // return;
-            if (!optimise_run) {
-                targetX=0;
-                targetY=0;
-            } else {
-                targetX=MAZESIZE-1;
-                targetY=MAZESIZE-1;
-            }
+            return;
+            // if (!optimise_run) {
+            //     targetX=0;
+            //     targetY=0;
+            // } else {
+            //     targetX=MAZESIZE-1;
+            //     targetY=MAZESIZE-1;
+            // }
             break;
         }
         rotate(degrees);
@@ -712,6 +709,13 @@ void loop() {
         digitalWrite(LED1, HIGH);
         digitalWrite(LED2, HIGH);
         mazeSolver();
+    }
+}
+
+void debugger() {
+    while(1) {
+        moveForward();
+        delay(500);
     }
 }
 
