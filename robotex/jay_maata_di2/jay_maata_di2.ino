@@ -714,18 +714,8 @@ void loop() {
 
 void debugger() {
     while(1) {
-        if(digitalRead(BTN1) == HIGH) {
-            delay(500);
-            rotate(90);
-            delay(500);
-            rotate(-90);
-            delay(500);
-        }
-        else if (digitalRead(BTN2) == HIGH) {
-            delay(500);
-            moveForward();
-        }
-        delay(10);
+        moveForward();
+        delay(500);
     }
 }
 

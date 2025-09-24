@@ -60,7 +60,7 @@ int baseSpeed = 220;
 int rotSpeed = 80;
 int minSpeed = 80;
 
-const int MAZESIZE = 16;
+const int MAZESIZE = 15;
 int targetX = MAZESIZE/2, targetY = MAZESIZE/2;
 const int unitBlock = 18;
 int blockSize = unitBlock;
@@ -96,11 +96,11 @@ int targetLeftDist = 54, targetRightDist = 54;
 
 const int wf_clearanceThresh = 130;
 const int wf_baseSpeed = 255;     // Further reduced for better control
-const int wf_targetDist = 50;     // mm desired wall distance
+const int wf_targetDist = 40;     // mm desired wall distance
 const int wf_frontThresh = 120;   // Reduced threshold for earlier detection
 const int wf_wallThresh = 80;    // Increased for better wall detection
-const int wf_outerSpeed = 250;    //255 Reduced for smoother turns
-const int wf_innerSpeed = 70;     //80 Increased minimum for better movement
+const int wf_outerSpeed = 255;    //255 Reduced for smoother turns
+const int wf_innerSpeed = 65;     //80 Increased minimum for better movement
 const int wf_rotationSpeed = 150; //200  // Further reduced for better accuracy
 
 // ---------------- Wall PID ----------------
@@ -124,7 +124,7 @@ void updateSensors() {
 
 // --- Main forward movement logic ---
 // float cmToEncoderTicks = 10.3;
-float cmToEncoderTicks = 10.3;
+float cmToEncoderTicks = 9.3;
 const float slowRate = 12;
 float encKp=wallKp, encKi=wallKi, encKd=wallKd;
 // --- Global PID states (single set) ---
